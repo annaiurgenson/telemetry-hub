@@ -84,10 +84,11 @@ TEST_F(SocketTest, MoveConstructionTransfersOwnership)
 TEST_F(SocketTest, MoveAssignmentClosesPreviousHandleAndTransfersOwnership)
 {
     const SOCKET old_handle = create_native_socket();
-    const SOCKET new_handle = create_native_socket();
     ASSERT_NE(old_handle, INVALID_SOCKET);
-    ASSERT_NE(new_handle, INVALID_SOCKET);
     Socket destination{old_handle};
+
+    const SOCKET new_handle = create_native_socket();
+    ASSERT_NE(new_handle, INVALID_SOCKET);
     Socket source{new_handle};
 
     destination = std::move(source);
@@ -95,6 +96,48 @@ TEST_F(SocketTest, MoveAssignmentClosesPreviousHandleAndTransfersOwnership)
     expect_handle_is_closed(old_handle);
     EXPECT_FALSE(source.valid());
     EXPECT_EQ(destination.native_handle(), new_handle);
+}
+
+TEST_F(SocketTest, SelfMoveAssignmentPreservesOwnership)
+{
+    const SOCKET handle = create_native_socket();
+    ASSERT_NE(handle, INVALID_SOCKET);
+    Socket socket{handle};
+
+    socket = std::move(socket);
+
+    EXPECT_TRUE(socket.valid());
+    EXPECT_EQ(socket.native_handle(), handle);
+    EXPECT_FALSE(socket.close());
+    EXPECT_FALSE(socket.valid());
+}
+
+TEST_F(SocketTest, FailedMoveAssignmentPreservesBothHandlesAndThrowsSystemError)
+{
+    const SOCKET destination_handle = create_native_socket();
+    ASSERT_NE(destination_handle, INVALID_SOCKET);
+    Socket destination{destination_handle};
+
+    const SOCKET source_handle = create_native_socket();
+    ASSERT_NE(source_handle, INVALID_SOCKET);
+    Socket source{source_handle};
+    ASSERT_EQ(closesocket(destination_handle), 0);
+
+    try
+    {
+        destination = std::move(source);
+        FAIL() << "Expected std::system_error";
+    }
+    catch (const std::system_error& error)
+    {
+        EXPECT_EQ(error.code().value(), WSAENOTSOCK);
+        EXPECT_STREQ(error.code().category().name(), "winsock");
+    }
+
+    EXPECT_TRUE(destination.valid());
+    EXPECT_EQ(destination.native_handle(), destination_handle);
+    EXPECT_TRUE(source.valid());
+    EXPECT_EQ(source.native_handle(), source_handle);
 }
 
 TEST_F(SocketTest, ReleaseTransfersHandleWithoutClosing)
@@ -138,12 +181,18 @@ TEST_F(SocketTest, RepeatedCloseIsSafe)
 TEST_F(SocketTest, ResetReplacesAndClosesPreviouslyOwnedHandle)
 {
     const SOCKET old_handle = create_native_socket();
-    const SOCKET replacement = create_native_socket();
     ASSERT_NE(old_handle, INVALID_SOCKET);
-    ASSERT_NE(replacement, INVALID_SOCKET);
     Socket socket{old_handle};
 
-    const std::error_code error = socket.reset(replacement);
+    const SOCKET replacement = create_native_socket();
+    ASSERT_NE(replacement, INVALID_SOCKET);
+    Socket replacement_owner{replacement};
+
+    const std::error_code error = socket.reset(replacement_owner.native_handle());
+    if (!error)
+    {
+        EXPECT_EQ(replacement_owner.release(), replacement);
+    }
 
     EXPECT_FALSE(error);
     expect_handle_is_closed(old_handle);
@@ -182,10 +231,11 @@ TEST_F(SocketTest, FailedExplicitClosePreservesHandleAndReportsWinsockError)
 TEST_F(SocketTest, FailedResetDoesNotAdoptReplacement)
 {
     const SOCKET stale_handle = create_native_socket();
-    const SOCKET replacement = create_native_socket();
     ASSERT_NE(stale_handle, INVALID_SOCKET);
-    ASSERT_NE(replacement, INVALID_SOCKET);
     Socket socket{stale_handle};
+
+    const SOCKET replacement = create_native_socket();
+    ASSERT_NE(replacement, INVALID_SOCKET);
     Socket replacement_cleanup{replacement};
     ASSERT_EQ(closesocket(stale_handle), 0);
 

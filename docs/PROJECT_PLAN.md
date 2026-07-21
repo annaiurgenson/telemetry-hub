@@ -90,13 +90,13 @@ TelemetryHub/
 |-- include/telemetryhub/
 |   |-- concurrency/
 |   |-- domain/
-|   |-- networking/
+|   |-- network/
 |   |-- protocol/
 |   `-- support/
 |-- src/
 |   |-- concurrency/
 |   |-- domain/
-|   |-- networking/
+|   |-- network/
 |   |-- protocol/
 |   `-- support/
 |-- apps/
@@ -113,10 +113,15 @@ Public headers live under `include/telemetryhub`; private implementation stays i
 
 ```text
 telemetryhub_project_options (INTERFACE: C++20 and project warnings)
+|-- telemetryhub_concurrency
+|   `-- telemetryhub_worker_pool_tests (+ GTest::gtest_main)
+|-- telemetryhub_network (privately links ws2_32)
+|   |-- telemetryhub_winsock_runtime_tests (+ GTest::gtest_main)
+|   `-- telemetryhub_socket_tests (+ GTest::gtest_main)
 |-- telemetry_server
 |-- device_simulator
-`-- telemetryhub_smoke_tests
-    `-- GTest::gtest_main
+|-- telemetryhub_smoke_tests (+ GTest::gtest_main)
+`-- telemetryhub_concurrency_tests (+ GTest::gtest_main)
 ```
 
 Future reusable component libraries will link `telemetryhub_project_options`; executables and tests will link only the components they use. Third-party GoogleTest targets do not inherit project warning-as-error flags.
@@ -155,6 +160,14 @@ Milestone 1B adds a fixed-size general-purpose `WorkerPool`. It stores move-only
 - Exit: complete local reads/writes, error paths, and predictable shutdown are demonstrated.
 
 Milestone 2A adds only the platform resource foundation. `WinsockRuntime` is a non-copyable and non-movable lexical guard that requests Winsock 2.2 and balances each successful `WSAStartup` with one `WSACleanup`. `Socket` is a move-only owner of one `SOCKET`; explicit `close()` and `reset()` return a Winsock-category `std::error_code`, preserve ownership on close failure, and never throw from destruction. Move assignment reports failure to close its prior handle with `std::system_error`. No socket communication or application integration is included.
+
+#### Milestone 2B - Basic TCP communication
+
+- Establish one localhost server connection and one client connection using `bind()`, `listen()`, `accept()`, and `connect()` with explicit Winsock error handling.
+- Complete a minimal `PING`/`PONG` exchange as raw bounded bytes, with helpers that handle partial writes and bounded reads without assuming TCP message boundaries.
+- Add deterministic localhost integration tests for connection establishment, complete writes, bounded reads, peer closure, expected error paths, and predictable shutdown.
+- Keep length-prefixed framing, JSON, typed protocol messages, request IDs, telemetry processing, worker-pool integration, client-session architecture, and application composition deferred to later milestones.
+- Exit: the one-server/one-client localhost exchange, complete I/O behavior, error paths, and shutdown tests pass repeatedly without external network access or leaked sockets/threads.
 
 ### Milestone 3 - Message protocol
 

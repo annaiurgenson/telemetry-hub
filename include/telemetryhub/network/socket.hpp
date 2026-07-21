@@ -26,6 +26,8 @@ public:
     [[nodiscard]] native_handle_type release() noexcept;
 
     // A replacement is adopted only if closing the current handle succeeds.
+    // On failure, this Socket retains its current handle; the caller retains
+    // ownership of replacement, which is neither closed nor adopted.
     [[nodiscard]] std::error_code reset(native_handle_type replacement = invalid_handle) noexcept;
     [[nodiscard]] std::error_code close() noexcept;
 
