@@ -20,3 +20,20 @@ target_link_libraries(
 
 include(GoogleTest)
 gtest_discover_tests(telemetryhub_smoke_tests)
+
+add_executable(
+    telemetryhub_concurrency_tests
+    unit/bounded_blocking_queue_test.cpp
+)
+target_link_libraries(
+    telemetryhub_concurrency_tests
+    PRIVATE
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+target_include_directories(
+    telemetryhub_concurrency_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+)
+gtest_discover_tests(telemetryhub_concurrency_tests)

@@ -145,6 +145,8 @@ Future reusable component libraries will link `telemetryhub_project_options`; ex
 - Implement and test `BoundedBlockingQueue<T>` closure, capacity, backpressure, cancellation, and a fixed worker pool. No TCP.
 - Exit: deterministic tests pass repeatedly without hangs or leaked joinable threads.
 
+Milestone 1A implements only `BoundedBlockingQueue<T>`. Its operations report `success`, `closed`, or `cancelled`; close is idempotent, rejects new pushes, wakes all waiters, and allows queued values to drain. The queue uses one mutex and stop-aware `std::condition_variable_any` waits with separate not-empty and not-full conditions. Callers must stop all participating threads before destroying the queue. `WorkerPool` remains deferred.
+
 ### Milestone 2 - Basic TCP communication
 
 - Add Winsock RAII, a move-only socket, and one-server/one-client `PING`/`PONG` communication.
@@ -180,4 +182,3 @@ These remain intentionally deferred until their implementing milestone:
 - Numeric acceptance rules and arithmetic-mean precision/overflow strategy.
 - Socket timeouts and the exact slow-client disconnect threshold.
 - Logger output destination and formatting.
-
