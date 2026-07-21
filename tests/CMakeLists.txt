@@ -37,3 +37,16 @@ target_include_directories(
         ${PROJECT_SOURCE_DIR}/include
 )
 gtest_discover_tests(telemetryhub_concurrency_tests)
+
+add_executable(
+    telemetryhub_worker_pool_tests
+    unit/worker_pool_test.cpp
+)
+target_link_libraries(
+    telemetryhub_worker_pool_tests
+    PRIVATE
+        telemetryhub_concurrency
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(telemetryhub_worker_pool_tests)

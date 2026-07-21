@@ -145,7 +145,9 @@ Future reusable component libraries will link `telemetryhub_project_options`; ex
 - Implement and test `BoundedBlockingQueue<T>` closure, capacity, backpressure, cancellation, and a fixed worker pool. No TCP.
 - Exit: deterministic tests pass repeatedly without hangs or leaked joinable threads.
 
-Milestone 1A implements only `BoundedBlockingQueue<T>`. Its operations report `success`, `closed`, or `cancelled`; close is idempotent, rejects new pushes, wakes all waiters, and allows queued values to drain. The queue uses one mutex and stop-aware `std::condition_variable_any` waits with separate not-empty and not-full conditions. Callers must stop all participating threads before destroying the queue. `WorkerPool` remains deferred.
+Milestone 1A implements only `BoundedBlockingQueue<T>`. Its operations report `success`, `closed`, or `cancelled`; close is idempotent, rejects new pushes, wakes all waiters, and allows queued values to drain. The queue uses one mutex and stop-aware `std::condition_variable_any` waits with separate not-empty and not-full conditions. Callers must stop all participating threads before destroying the queue.
+
+Milestone 1B adds a fixed-size general-purpose `WorkerPool`. It stores move-only `std::packaged_task<void()>` work in the bounded queue and returns each submitted callable's typed future. The queue's close state is the single acceptance boundary: submissions linearized before close are accepted and drained, while blocked or later submissions report `closed`; a blocked submit may instead report `cancelled` through its caller-provided stop token. Graceful shutdown closes the queue, lets workers finish all accepted tasks, and joins every worker. A shutdown mutex serializes shutdown callers and protects the transition to the fully stopped state. Shutdown and destruction must be initiated outside the pool's own worker threads because a thread cannot join itself. Immediate cancellation of accepted tasks remains deferred.
 
 ### Milestone 2 - Basic TCP communication
 

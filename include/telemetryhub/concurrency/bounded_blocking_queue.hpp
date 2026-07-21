@@ -29,6 +29,8 @@ template <typename T>
 class BoundedBlockingQueue
 {
 public:
+    // The queue does not own participating threads. All threads performing
+    // queue operations must stop before the queue object is destroyed.
     explicit BoundedBlockingQueue(const std::size_t capacity)
         : capacity_{capacity}
     {

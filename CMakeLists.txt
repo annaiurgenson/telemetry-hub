@@ -14,6 +14,17 @@ add_library(telemetryhub_project_options INTERFACE)
 target_compile_features(telemetryhub_project_options INTERFACE cxx_std_20)
 telemetryhub_set_project_warnings(telemetryhub_project_options)
 
+add_library(
+    telemetryhub_concurrency
+    src/concurrency/worker_pool.cpp
+)
+target_include_directories(
+    telemetryhub_concurrency
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(telemetryhub_concurrency PUBLIC telemetryhub_project_options)
+
 add_executable(telemetry_server apps/telemetry_server/main.cpp)
 target_link_libraries(telemetry_server PRIVATE telemetryhub_project_options)
 
@@ -23,4 +34,3 @@ target_link_libraries(device_simulator PRIVATE telemetryhub_project_options)
 if(BUILD_TESTING)
     add_subdirectory(tests)
 endif()
-
