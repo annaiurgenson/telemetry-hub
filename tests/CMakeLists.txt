@@ -50,3 +50,29 @@ target_link_libraries(
         GTest::gtest_main
 )
 gtest_discover_tests(telemetryhub_worker_pool_tests)
+
+add_executable(
+    telemetryhub_winsock_runtime_tests
+    unit/winsock_runtime_test.cpp
+)
+target_link_libraries(
+    telemetryhub_winsock_runtime_tests
+    PRIVATE
+        telemetryhub_network
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(telemetryhub_winsock_runtime_tests)
+
+add_executable(
+    telemetryhub_socket_tests
+    unit/socket_test.cpp
+)
+target_link_libraries(
+    telemetryhub_socket_tests
+    PRIVATE
+        telemetryhub_network
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(telemetryhub_socket_tests)

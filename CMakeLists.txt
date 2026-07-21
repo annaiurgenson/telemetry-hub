@@ -25,6 +25,25 @@ target_include_directories(
 )
 target_link_libraries(telemetryhub_concurrency PUBLIC telemetryhub_project_options)
 
+add_library(
+    telemetryhub_network
+    src/network/socket.cpp
+    src/network/winsock_error.cpp
+    src/network/winsock_runtime.cpp
+)
+target_include_directories(
+    telemetryhub_network
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(
+    telemetryhub_network
+    PUBLIC
+        telemetryhub_project_options
+    PRIVATE
+        ws2_32
+)
+
 add_executable(telemetry_server apps/telemetry_server/main.cpp)
 target_link_libraries(telemetry_server PRIVATE telemetryhub_project_options)
 

@@ -154,6 +154,8 @@ Milestone 1B adds a fixed-size general-purpose `WorkerPool`. It stores move-only
 - Add Winsock RAII, a move-only socket, and one-server/one-client `PING`/`PONG` communication.
 - Exit: complete local reads/writes, error paths, and predictable shutdown are demonstrated.
 
+Milestone 2A adds only the platform resource foundation. `WinsockRuntime` is a non-copyable and non-movable lexical guard that requests Winsock 2.2 and balances each successful `WSAStartup` with one `WSACleanup`. `Socket` is a move-only owner of one `SOCKET`; explicit `close()` and `reset()` return a Winsock-category `std::error_code`, preserve ownership on close failure, and never throw from destruction. Move assignment reports failure to close its prior handle with `std::system_error`. No socket communication or application integration is included.
+
 ### Milestone 3 - Message protocol
 
 - Implement the approved length-prefixed JSON protocol, request IDs, typed parsing/serialization, validation, and size limits.
