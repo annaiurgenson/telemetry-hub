@@ -117,7 +117,8 @@ telemetryhub_project_options (INTERFACE: C++20 and project warnings)
 |   `-- telemetryhub_worker_pool_tests (+ GTest::gtest_main)
 |-- telemetryhub_network (privately links ws2_32)
 |   |-- telemetryhub_winsock_runtime_tests (+ GTest::gtest_main)
-|   `-- telemetryhub_socket_tests (+ GTest::gtest_main)
+|   |-- telemetryhub_socket_tests (+ GTest::gtest_main)
+|   `-- telemetryhub_tcp_integration_tests (+ GTest::gtest_main)
 |-- telemetry_server
 |-- device_simulator
 |-- telemetryhub_smoke_tests (+ GTest::gtest_main)
@@ -168,6 +169,8 @@ Milestone 2A adds only the platform resource foundation. `WinsockRuntime` is a n
 - Add deterministic localhost integration tests for connection establishment, complete writes, bounded reads, peer closure, expected error paths, and predictable shutdown.
 - Keep length-prefixed framing, JSON, typed protocol messages, request IDs, telemetry processing, worker-pool integration, client-session architecture, and application composition deferred to later milestones.
 - Exit: the one-server/one-client localhost exchange, complete I/O behavior, error paths, and shutdown tests pass repeatedly without external network access or leaked sockets/threads.
+
+Milestone 2B uses focused free functions rather than a server or session abstraction. Setup operations throw `std::system_error` with Winsock codes and operation context. `send_all()` succeeds only after the full byte span is written and otherwise reports both the sent prefix length and error. `receive_some()` reads no more than its nonempty caller-provided buffer and distinguishes data, graceful peer closure, and error. Buffer lengths are safely limited to Winsock's `int` range per call. This transport is blocking, IPv4-loopback-only, and has no cancellation or production shutdown coordination. Deterministically forcing a partial `send()` is deferred; the write loop handles it when Winsock returns one naturally.
 
 ### Milestone 3 - Message protocol
 

@@ -28,6 +28,7 @@ target_link_libraries(telemetryhub_concurrency PUBLIC telemetryhub_project_optio
 add_library(
     telemetryhub_network
     src/network/socket.cpp
+    src/network/tcp.cpp
     src/network/winsock_error.cpp
     src/network/winsock_runtime.cpp
 )

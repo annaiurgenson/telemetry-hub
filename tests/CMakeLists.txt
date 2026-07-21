@@ -76,3 +76,20 @@ target_link_libraries(
         GTest::gtest_main
 )
 gtest_discover_tests(telemetryhub_socket_tests)
+
+add_executable(
+    telemetryhub_tcp_integration_tests
+    integration/tcp_communication_test.cpp
+)
+target_link_libraries(
+    telemetryhub_tcp_integration_tests
+    PRIVATE
+        telemetryhub_network
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(
+    telemetryhub_tcp_integration_tests
+    PROPERTIES
+        TIMEOUT 10
+)
