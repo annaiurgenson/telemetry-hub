@@ -5,6 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
+#include <exception>
+#include <future>
+#include <thread>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -240,4 +244,78 @@ TEST_F(TcpCommunicationTest, GracefulPeerClosureIsDistinguishedFromError)
     EXPECT_FALSE(result.error);
 }
 
+void expect_receive_interrupted(const bool close_peer_after_local_shutdown)
+{
+    using namespace std::chrono_literals;
+    ConnectedSockets sockets = make_connected_sockets();
+    std::promise<void> entering;
+    auto entered = entering.get_future();
+    std::promise<telemetryhub::network::ReceiveResult> completion;
+    auto completed = completion.get_future();
+    std::jthread reader{[&] {
+        try
+        {
+            std::array<std::byte, 1U> buffer{};
+            entering.set_value();
+            completion.set_value(receive_some(sockets.server, buffer));
+        }
+        catch (...)
+        {
+            completion.set_exception(std::current_exception());
+        }
+    }};
+
+    EXPECT_EQ(entered.wait_for(2s), std::future_status::ready);
+    // Winsock has no public notification that recv has entered its wait. This
+    // observation gives the ready reader a chance to enter, but cannot prove
+    // kernel wait entry under arbitrary scheduler starvation.
+    EXPECT_EQ(completed.wait_for(20ms), std::future_status::timeout);
+    const Socket& target = close_peer_after_local_shutdown ? sockets.server : sockets.client;
+    const int result = ::shutdown(target.native_handle(), close_peer_after_local_shutdown ? SD_BOTH : SD_SEND);
+    const int shutdown_error = result == SOCKET_ERROR ? WSAGetLastError() : 0;
+    EXPECT_EQ(result, 0) << "shutdown failed with Winsock error " << shutdown_error;
+    if (close_peer_after_local_shutdown)
+    {
+        // Local shutdown alone did not release pending recv on this platform.
+        // Peer closure is the interruption source; keep the reader socket alive.
+        EXPECT_FALSE(sockets.client.close());
+    }
+    const auto status = completed.wait_for(2s);
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status != std::future_status::ready)
+    {
+        // Failure cleanup closes the peer, never the socket still used by recv.
+        // CTest's process timeout is the final guard against broken interruption.
+        EXPECT_FALSE(sockets.client.close());
+    }
+    reader.join();
+    const auto received = completed.get();
+    EXPECT_EQ(received.bytes_transferred, 0U);
+    EXPECT_NE(received.status, ReceiveStatus::data);
+    if (received.status == ReceiveStatus::error)
+    {
+        EXPECT_TRUE(received.error);
+        EXPECT_STREQ(received.error.category().name(), "winsock");
+    }
+    if (!close_peer_after_local_shutdown)
+    {
+        EXPECT_EQ(received.status, ReceiveStatus::peer_closed);
+        EXPECT_FALSE(received.error);
+    }
+    // Ownership outlives the reader; explicit close verifies cleanup results.
+    EXPECT_FALSE(sockets.server.close());
+    EXPECT_FALSE(sockets.client.close());
+    EXPECT_FALSE(sockets.server.valid());
+    EXPECT_FALSE(sockets.client.valid());
+}
+
+TEST_F(TcpCommunicationTest, LocalShutdownThenPeerCloseReleasesPendingReceive)
+{
+    expect_receive_interrupted(true);
+}
+
+TEST_F(TcpCommunicationTest, PeerSendShutdownReleasesPendingReceiveWithEof)
+{
+    expect_receive_interrupted(false);
+}
 } // namespace

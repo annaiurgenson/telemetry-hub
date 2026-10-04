@@ -19,7 +19,8 @@ using telemetryhub::concurrency::SubmitStatus;
 using telemetryhub::concurrency::WorkerPool;
 using namespace std::chrono_literals;
 
-constexpr auto blocked_probe = 50ms;
+// Noncompletion checks remain only for backpressure and synchronous shutdown.
+constexpr auto blocked_probe = 20ms;
 constexpr auto completion_timeout = 2s;
 
 template <typename R>
@@ -174,9 +175,12 @@ TEST(WorkerPool, AppliesBackpressureWhenQueueIsFull)
     ASSERT_EQ(running_signal.wait_for(completion_timeout), std::future_status::ready);
     auto second = take_accepted_future(pool.submit([] {}));
 
-    auto blocked_submission = std::async(std::launch::async, [&pool] {
+    std::latch submitting{1};
+    auto blocked_submission = std::async(std::launch::async, [&pool, &submitting] {
+        submitting.count_down();
         return pool.submit([] {});
     });
+    submitting.wait();
     EXPECT_EQ(blocked_submission.wait_for(blocked_probe), std::future_status::timeout);
 
     release.set_value();
@@ -203,10 +207,12 @@ TEST(WorkerPool, CancelsSubmissionBlockedByFullQueue)
 
     std::promise<telemetryhub::concurrency::SubmitResult<void>> completion;
     auto completed = completion.get_future();
-    std::jthread producer{[&pool, &completion](const std::stop_token stop_token) {
+    std::latch submitting{1};
+    std::jthread producer{[&pool, &completion, &submitting](const std::stop_token stop_token) {
+        submitting.count_down();
         completion.set_value(pool.submit([] {}, stop_token));
     }};
-    EXPECT_EQ(completed.wait_for(blocked_probe), std::future_status::timeout);
+    submitting.wait();
     producer.request_stop();
 
     ASSERT_EQ(completed.wait_for(completion_timeout), std::future_status::ready);
@@ -237,9 +243,12 @@ TEST(WorkerPool, GracefulShutdownDrainsQueuedTasks)
     auto second = take_accepted_future(pool.submit([&executions] { ++executions; }));
     auto third = take_accepted_future(pool.submit([&executions] { ++executions; }));
 
-    auto shutdown = std::async(std::launch::async, [&pool] {
+    std::latch stopping{1};
+    auto shutdown = std::async(std::launch::async, [&pool, &stopping] {
+        stopping.count_down();
         pool.shutdown();
     });
+    stopping.wait();
     EXPECT_EQ(shutdown.wait_for(blocked_probe), std::future_status::timeout);
     release.set_value();
     ASSERT_EQ(shutdown.wait_for(completion_timeout), std::future_status::ready);
@@ -265,10 +274,12 @@ TEST(WorkerPool, ShutdownWakesAndRejectsBlockedSubmission)
     ASSERT_EQ(running_signal.wait_for(completion_timeout), std::future_status::ready);
     auto second = take_accepted_future(pool.submit([] {}));
 
-    auto blocked_submission = std::async(std::launch::async, [&pool] {
+    std::latch submitting{1};
+    auto blocked_submission = std::async(std::launch::async, [&pool, &submitting] {
+        submitting.count_down();
         return pool.submit([] {});
     });
-    EXPECT_EQ(blocked_submission.wait_for(blocked_probe), std::future_status::timeout);
+    submitting.wait();
     auto shutdown = std::async(std::launch::async, [&pool] {
         pool.shutdown();
     });

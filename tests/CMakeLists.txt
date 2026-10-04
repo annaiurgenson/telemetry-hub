@@ -36,7 +36,7 @@ target_include_directories(
     PRIVATE
         ${PROJECT_SOURCE_DIR}/include
 )
-gtest_discover_tests(telemetryhub_concurrency_tests)
+gtest_discover_tests(telemetryhub_concurrency_tests PROPERTIES TIMEOUT 10)
 
 add_executable(
     telemetryhub_worker_pool_tests
@@ -49,7 +49,7 @@ target_link_libraries(
         telemetryhub_project_options
         GTest::gtest_main
 )
-gtest_discover_tests(telemetryhub_worker_pool_tests)
+gtest_discover_tests(telemetryhub_worker_pool_tests PROPERTIES TIMEOUT 10)
 
 add_executable(
     telemetryhub_winsock_runtime_tests

@@ -20,7 +20,8 @@ using telemetryhub::concurrency::BoundedBlockingQueue;
 using telemetryhub::concurrency::QueueOperationStatus;
 using namespace std::chrono_literals;
 
-constexpr auto blocked_probe = 50ms;
+// Only the dedicated blocking tests observe noncompletion: the public API has no wait-entry hook.
+constexpr auto blocked_probe = 20ms;
 constexpr auto completion_timeout = 2s;
 
 TEST(BoundedBlockingQueue, ConstructsWithPositiveCapacity)
@@ -73,10 +74,13 @@ TEST(BoundedBlockingQueue, ProducerBlocksWhileFull)
 
     std::promise<QueueOperationStatus> completion;
     auto completed = completion.get_future();
-    std::jthread producer{[&queue, &completion] {
+    std::latch started{1};
+    std::jthread producer{[&queue, &completion, &started] {
+        started.count_down();
         completion.set_value(queue.push(2));
     }};
 
+    started.wait();
     EXPECT_EQ(completed.wait_for(blocked_probe), std::future_status::timeout);
     auto first = queue.pop();
     ASSERT_EQ(first.status, QueueOperationStatus::success);
@@ -89,10 +93,13 @@ TEST(BoundedBlockingQueue, ConsumerBlocksWhileEmpty)
     BoundedBlockingQueue<int> queue{1U};
     std::promise<QueueOperationStatus> completion;
     auto completed = completion.get_future();
-    std::jthread consumer{[&queue, &completion] {
+    std::latch started{1};
+    std::jthread consumer{[&queue, &completion, &started] {
+        started.count_down();
         completion.set_value(queue.pop().status);
     }};
 
+    started.wait();
     EXPECT_EQ(completed.wait_for(blocked_probe), std::future_status::timeout);
     queue.close();
     ASSERT_EQ(completed.wait_for(completion_timeout), std::future_status::ready);
@@ -104,11 +111,13 @@ TEST(BoundedBlockingQueue, PushWakesWaitingConsumer)
     BoundedBlockingQueue<int> queue{1U};
     std::promise<telemetryhub::concurrency::QueuePopResult<int>> completion;
     auto completed = completion.get_future();
-    std::jthread consumer{[&queue, &completion] {
+    std::latch started{1};
+    std::jthread consumer{[&queue, &completion, &started] {
+        started.count_down();
         completion.set_value(queue.pop());
     }};
 
-    EXPECT_EQ(completed.wait_for(blocked_probe), std::future_status::timeout);
+    started.wait();
     ASSERT_EQ(queue.push(7), QueueOperationStatus::success);
     ASSERT_EQ(completed.wait_for(completion_timeout), std::future_status::ready);
     auto result = completed.get();
@@ -124,11 +133,13 @@ TEST(BoundedBlockingQueue, PopWakesWaitingProducer)
 
     std::promise<QueueOperationStatus> completion;
     auto completed = completion.get_future();
-    std::jthread producer{[&queue, &completion] {
+    std::latch started{1};
+    std::jthread producer{[&queue, &completion, &started] {
+        started.count_down();
         completion.set_value(queue.push(2));
     }};
 
-    EXPECT_EQ(completed.wait_for(blocked_probe), std::future_status::timeout);
+    started.wait();
     ASSERT_EQ(queue.pop().status, QueueOperationStatus::success);
     ASSERT_EQ(completed.wait_for(completion_timeout), std::future_status::ready);
     EXPECT_EQ(completed.get(), QueueOperationStatus::success);
@@ -146,11 +157,13 @@ TEST(BoundedBlockingQueue, CancelsWaitingProducerWithoutAddingValue)
 
     std::promise<QueueOperationStatus> completion;
     auto completed = completion.get_future();
-    std::jthread producer{[&queue, &completion](const std::stop_token stop_token) {
+    std::latch started{1};
+    std::jthread producer{[&queue, &completion, &started](const std::stop_token stop_token) {
+        started.count_down();
         completion.set_value(queue.push(2, stop_token));
     }};
 
-    EXPECT_EQ(completed.wait_for(blocked_probe), std::future_status::timeout);
+    started.wait();
     producer.request_stop();
     ASSERT_EQ(completed.wait_for(completion_timeout), std::future_status::ready);
     EXPECT_EQ(completed.get(), QueueOperationStatus::cancelled);
@@ -166,11 +179,13 @@ TEST(BoundedBlockingQueue, CancelsWaitingConsumer)
     BoundedBlockingQueue<int> queue{1U};
     std::promise<QueueOperationStatus> completion;
     auto completed = completion.get_future();
-    std::jthread consumer{[&queue, &completion](const std::stop_token stop_token) {
+    std::latch started{1};
+    std::jthread consumer{[&queue, &completion, &started](const std::stop_token stop_token) {
+        started.count_down();
         completion.set_value(queue.pop(stop_token).status);
     }};
 
-    EXPECT_EQ(completed.wait_for(blocked_probe), std::future_status::timeout);
+    started.wait();
     consumer.request_stop();
     ASSERT_EQ(completed.wait_for(completion_timeout), std::future_status::ready);
     EXPECT_EQ(completed.get(), QueueOperationStatus::cancelled);
@@ -250,11 +265,6 @@ TEST(BoundedBlockingQueue, CloseWakesAllBlockedWaiters)
     }
 
     started.wait();
-    for (std::size_t index = 0; index < waiter_count; ++index)
-    {
-        EXPECT_EQ(producer_futures[index].wait_for(blocked_probe), std::future_status::timeout);
-        EXPECT_EQ(consumer_futures[index].wait_for(blocked_probe), std::future_status::timeout);
-    }
 
     full_queue.close();
     empty_queue.close();

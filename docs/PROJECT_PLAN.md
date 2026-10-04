@@ -70,7 +70,7 @@ TCP bytes
 - Resource-owning handles are RAII-based and move-only where appropriate. There are no owning raw pointers or detached threads.
 - The initial I/O model is one accept thread, one reader and writer per connection, a fixed-size worker pool, and one dispatcher thread if the global completed-response queue is used.
 - Owned threads use `std::jthread` and `std::stop_token`. Response ordering within a connection is not guaranteed.
-- Shutdown stops acceptance, requests stop, calls Winsock `shutdown()` on active sockets to unblock `recv()` and `send()`, closes queues according to their drain/cancel policy, joins threads, and finally releases sockets and Winsock.
+- Shutdown stops acceptance, requests stop, calls Winsock `shutdown()` on active sockets and uses an I/O interruption mechanism to be validated in Milestone 4 (local `shutdown()` alone did not release a pending `recv()` during Milestone 2C testing), closes queues according to their drain/cancel policy, joins threads, and finally releases sockets and Winsock.
 - Startup or unrecoverable configuration failures may throw exceptions such as `std::system_error`.
 - Expected connection-level network errors close only the affected connection. Protocol validation normally produces typed errors rather than cross-layer exceptions.
 - Every thread-entry boundary catches all exceptions; none may escape a thread function.
@@ -135,7 +135,7 @@ Future reusable component libraries will link `telemetryhub_project_options`; ex
 4. Concurrent writes can corrupt frames: each connection has exactly one coordinated writer.
 5. Responses race with disconnect/reconnect: stable connection IDs, not device IDs, control routing.
 6. Worker completion is unordered: request IDs provide correlation and ordering is explicitly not guaranteed.
-7. `std::stop_token` cannot interrupt Winsock by itself: socket `shutdown()` participates in cancellation.
+7. `std::stop_token` cannot interrupt Winsock by itself: local `shutdown()` alone did not release a pending receive in Milestone 2C testing. Reliable server-side interruption must be resolved before Milestone 4 shutdown can be considered complete.
 8. JSON validation has resource costs: frame size, nesting, field types, and numeric ranges require limits in Milestone 3.
 9. Fetching GoogleTest requires network access on a clean configure: its version is pinned for repeatability.
 
@@ -158,7 +158,7 @@ Milestone 1B adds a fixed-size general-purpose `WorkerPool`. It stores move-only
 ### Milestone 2 - Basic TCP communication
 
 - Add Winsock RAII, a move-only socket, and one-server/one-client `PING`/`PONG` communication.
-- Exit: complete local reads/writes, error paths, and predictable shutdown are demonstrated.
+- Exit: raw localhost exchange, bounded reads, complete-write results, resource ownership, error paths, and receive interruption followed by join-before-close cleanup are demonstrated. Production session shutdown remains deferred to Milestone 4.
 
 Milestone 2A adds only the platform resource foundation. `WinsockRuntime` is a non-copyable and non-movable lexical guard that requests Winsock 2.2 and balances each successful `WSAStartup` with one `WSACleanup`. `Socket` is a move-only owner of one `SOCKET`; explicit `close()` and `reset()` return a Winsock-category `std::error_code`, preserve ownership on close failure, and never throw from destruction. Move assignment reports failure to close its prior handle with `std::system_error`. No socket communication or application integration is included.
 
@@ -166,11 +166,18 @@ Milestone 2A adds only the platform resource foundation. `WinsockRuntime` is a n
 
 - Establish one localhost server connection and one client connection using `bind()`, `listen()`, `accept()`, and `connect()` with explicit Winsock error handling.
 - Complete a minimal `PING`/`PONG` exchange as raw bounded bytes, with helpers that handle partial writes and bounded reads without assuming TCP message boundaries.
-- Add deterministic localhost integration tests for connection establishment, complete writes, bounded reads, peer closure, expected error paths, and predictable shutdown.
+- Add deterministic localhost integration tests for connection establishment, complete writes, bounded reads, peer closure, and expected error paths. Active receive interruption is covered separately in Milestone 2C.
 - Keep length-prefixed framing, JSON, typed protocol messages, request IDs, telemetry processing, worker-pool integration, client-session architecture, and application composition deferred to later milestones.
-- Exit: the one-server/one-client localhost exchange, complete I/O behavior, error paths, and shutdown tests pass repeatedly without external network access or leaked sockets/threads.
+- Exit: the one-server/one-client localhost exchange, bounded I/O behavior, error paths, and peer-closure tests pass repeatedly without external network access or leaked sockets/threads.
 
-Milestone 2B uses focused free functions rather than a server or session abstraction. Setup operations throw `std::system_error` with Winsock codes and operation context. `send_all()` succeeds only after the full byte span is written and otherwise reports both the sent prefix length and error. `receive_some()` reads no more than its nonempty caller-provided buffer and distinguishes data, graceful peer closure, and error. Buffer lengths are safely limited to Winsock's `int` range per call. This transport is blocking, IPv4-loopback-only, and has no cancellation or production shutdown coordination. Deterministically forcing a partial `send()` is deferred; the write loop handles it when Winsock returns one naturally.
+Milestone 2B uses focused free functions rather than a server or session abstraction. Setup operations throw `std::system_error` with Winsock codes and operation context. `send_all()` succeeds only after the full byte span is written and otherwise reports both the sent prefix length and error. `receive_some()` reads no more than its nonempty caller-provided buffer and distinguishes data, graceful peer closure, and error. Buffer lengths are safely limited to Winsock's `int` range per call. This transport is blocking, IPv4-loopback-only, and has no cancellation or production shutdown coordination. Deterministically forcing a partial `send()` remains deferred to Milestone 3 complete-frame transmission work; the write loop handles it when Winsock returns one naturally.
+
+#### Milestone 2C - Foundation test hardening
+
+- Coordinate concurrency test actions with readiness signals rather than elapsed-time synchronization. Dedicated full/empty queue, worker backpressure, and synchronous shutdown checks retain a 20 ms noncompletion observation because the public APIs expose no internal wait-entry notification. Readiness immediately before an operation does not prove that its internal wait has begun.
+- Test a pending localhost receive released by peer closure after local `shutdown(SD_BOTH)`, and independently by peer `shutdown(SD_SEND)`. A direct local-shutdown-only experiment failed its two-second completion deadline on the tested Windows installation; peer closure released the reader during failure cleanup. Keep the receiving socket owned until the reader joins, then check explicit `Socket::close()` results. Readiness signals coordinate the actions; a 20 ms observation checks noncompletion, with the same scheduler limitation. Two-second completion deadlines and CTest process timeouts guard failures.
+- Exit: the full suite and repeated concurrency/TCP runs pass. No production behavior or public API changes are required.
+- These tests demonstrate peer-driven receive interruption and cleanup, not reliable local-only cancellation, blocked-send interruption, or a production shutdown coordinator. Peer cooperation cannot be assumed for production cancellation; resolving that design remains a Milestone 4 prerequisite. Forced partial-write coverage, framing, JSON, and typed protocol behavior remain deferred to Milestone 3; sessions and coordinated server shutdown remain deferred to Milestone 4.
 
 ### Milestone 3 - Message protocol
 
