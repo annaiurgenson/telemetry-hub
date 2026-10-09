@@ -70,7 +70,7 @@ TCP bytes
 - Resource-owning handles are RAII-based and move-only where appropriate. There are no owning raw pointers or detached threads.
 - The initial I/O model is one accept thread, one reader and writer per connection, a fixed-size worker pool, and one dispatcher thread if the global completed-response queue is used.
 - Owned threads use `std::jthread` and `std::stop_token`. Response ordering within a connection is not guaranteed.
-- Shutdown stops acceptance, requests stop, calls Winsock `shutdown()` on active sockets and uses an I/O interruption mechanism to be validated in Milestone 4 (local `shutdown()` alone did not release a pending `recv()` during Milestone 2C testing), closes queues according to their drain/cancel policy, joins threads, and finally releases sockets and Winsock.
+- Future connection sockets are configured nonblocking. Per-connection I/O loops use finite-timeout `WSAPoll()` waits and check stop tokens between waits. The connection/session object retains socket ownership while reader and writer threads borrow the handle. Shutdown requests stop, joins the I/O threads, and only then closes the socket. Local `shutdown(SD_BOTH)` is not relied upon as the primary cancellation mechanism. Queues are closed according to their drain/cancel policy before their owning synchronization state is destroyed.
 - Startup or unrecoverable configuration failures may throw exceptions such as `std::system_error`.
 - Expected connection-level network errors close only the affected connection. Protocol validation normally produces typed errors rather than cross-layer exceptions.
 - Every thread-entry boundary catches all exceptions; none may escape a thread function.
@@ -170,14 +170,22 @@ Milestone 2A adds only the platform resource foundation. `WinsockRuntime` is a n
 - Keep length-prefixed framing, JSON, typed protocol messages, request IDs, telemetry processing, worker-pool integration, client-session architecture, and application composition deferred to later milestones.
 - Exit: the one-server/one-client localhost exchange, bounded I/O behavior, error paths, and peer-closure tests pass repeatedly without external network access or leaked sockets/threads.
 
-Milestone 2B uses focused free functions rather than a server or session abstraction. Setup operations throw `std::system_error` with Winsock codes and operation context. `send_all()` succeeds only after the full byte span is written and otherwise reports both the sent prefix length and error. `receive_some()` reads no more than its nonempty caller-provided buffer and distinguishes data, graceful peer closure, and error. Buffer lengths are safely limited to Winsock's `int` range per call. This transport is blocking, IPv4-loopback-only, and has no cancellation or production shutdown coordination. Deterministically forcing a partial `send()` remains deferred to Milestone 3 complete-frame transmission work; the write loop handles it when Winsock returns one naturally.
+Milestone 2B uses focused free functions rather than a server or session abstraction. Setup operations throw `std::system_error` with Winsock codes and operation context. `send_all()` succeeds only after the full byte span is written and otherwise reports both the sent prefix length and error. `receive_some()` reads no more than its nonempty caller-provided buffer and distinguishes data, graceful peer closure, and error. Buffer lengths are safely limited to Winsock's `int` range per call. The Milestone 2B transport began as blocking, IPv4-loopback-only I/O without cancellation; Milestone 2D replaces the I/O path with nonblocking sockets and stop-aware polling. Deterministically forcing a partial `send()` remains deferred to Milestone 3 complete-frame transmission work; the write loop handles it when Winsock returns one naturally.
 
 #### Milestone 2C - Foundation test hardening
 
 - Coordinate concurrency test actions with readiness signals rather than elapsed-time synchronization. Dedicated full/empty queue, worker backpressure, and synchronous shutdown checks retain a 20 ms noncompletion observation because the public APIs expose no internal wait-entry notification. Readiness immediately before an operation does not prove that its internal wait has begun.
-- Test a pending localhost receive released by peer closure after local `shutdown(SD_BOTH)`, and independently by peer `shutdown(SD_SEND)`. A direct local-shutdown-only experiment failed its two-second completion deadline on the tested Windows installation; peer closure released the reader during failure cleanup. Keep the receiving socket owned until the reader joins, then check explicit `Socket::close()` results. Readiness signals coordinate the actions; a 20 ms observation checks noncompletion, with the same scheduler limitation. Two-second completion deadlines and CTest process timeouts guard failures.
-- Exit: the full suite and repeated concurrency/TCP runs pass. No production behavior or public API changes are required.
-- These tests demonstrate peer-driven receive interruption and cleanup, not reliable local-only cancellation, blocked-send interruption, or a production shutdown coordinator. Peer cooperation cannot be assumed for production cancellation; resolving that design remains a Milestone 4 prerequisite. Forced partial-write coverage, framing, JSON, and typed protocol behavior remain deferred to Milestone 3; sessions and coordinated server shutdown remain deferred to Milestone 4.
+- Test pending localhost receive behavior with peer closure and peer `shutdown(SD_SEND)`. A local-shutdown-only experiment failed its two-second completion deadline on the tested Windows installation; peer closure released the reader during failure cleanup.
+- Exit: the full suite and repeated concurrency/TCP runs pass. Production interruptible I/O remains a later foundation change.
+- These tests demonstrate peer-driven receive interruption, not reliable local-only cancellation. Framing, JSON, and typed protocol behavior remain deferred to Milestone 3; sessions and coordinated server shutdown remain deferred to Milestone 4.
+
+#### Milestone 2D - Interruptible socket I/O foundation
+
+- Configure stream sockets as nonblocking with a checked Winsock mode operation.
+- Add finite-timeout `WSAPoll()` readiness waits (100 ms default) with distinct ready, timeout/retry, cancellation, and error outcomes.
+- Add stop-aware receive and complete-send helpers. Retry `WSAEWOULDBLOCK` after polling; preserve partial-send counts on error or cancellation.
+- Keep socket ownership with the caller/connection object. Borrowing I/O threads must exit and be joined before the owner closes or destroys the socket. Do not rely on local `shutdown(SD_BOTH)` for cancellation.
+- Exit: localhost tests cover idle-reader cancellation, data and EOF, repeated cancellation, constrained-buffer writer cancellation, complete writes, would-block backpressure, and join-before-close ownership. No protocol or session behavior is introduced.
 
 ### Milestone 3 - Message protocol
 

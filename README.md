@@ -43,6 +43,6 @@ The first configure downloads the pinned GoogleTest dependency and therefore req
 
 ## Status
 
-Milestone 0 provides the project skeleton, strict warning configuration, application placeholders, and smoke-test infrastructure. Milestone 1 adds the reusable `BoundedBlockingQueue<T>` concurrency primitive and a fixed-size `WorkerPool` with bounded submission, cancellation, futures, and graceful draining shutdown. Milestone 2 adds Winsock resource ownership and basic blocking IPv4-loopback TCP byte transport with complete writes, bounded reads, and localhost integration tests. Length-prefixed framing, protocol parsing, logging, and telemetry processing are not implemented yet.
+Milestone 0 provides the project skeleton, strict warning configuration, application placeholders, and smoke-test infrastructure. Milestone 1 adds the reusable `BoundedBlockingQueue<T>` concurrency primitive and a fixed-size `WorkerPool` with bounded submission, cancellation, futures, and graceful draining shutdown. Milestone 2 adds Winsock resource ownership and nonblocking IPv4-loopback TCP byte transport with stop-aware receive, complete writes, finite-timeout polling, and localhost integration tests. Length-prefixed framing, protocol parsing, logging, and telemetry processing are not implemented yet.
 
 Architecture, approved decisions, risks, and milestone exit criteria are recorded in [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md). Development proceeds one explicitly approved milestone at a time.

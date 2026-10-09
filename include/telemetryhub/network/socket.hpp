@@ -25,6 +25,9 @@ public:
     [[nodiscard]] native_handle_type native_handle() const noexcept;
     [[nodiscard]] native_handle_type release() noexcept;
 
+    // Configure before starting any threads that borrow the handle.
+    [[nodiscard]] std::error_code set_nonblocking(bool enabled) noexcept;
+
     // A replacement is adopted only if closing the current handle succeeds.
     // On failure, this Socket retains its current handle; the caller retains
     // ownership of replacement, which is neither closed nor adopted.

@@ -39,7 +39,7 @@ protected:
 
 TEST_F(SocketTest, DefaultConstructsInvalid)
 {
-    const Socket socket;
+    Socket socket;
 
     EXPECT_FALSE(socket.valid());
     EXPECT_EQ(socket.native_handle(), INVALID_SOCKET);
@@ -246,4 +246,25 @@ TEST_F(SocketTest, FailedResetDoesNotAdoptReplacement)
     EXPECT_EQ(replacement_cleanup.native_handle(), replacement);
 }
 
+
+TEST_F(SocketTest, ConfiguresNonblockingModeAndCanRestoreBlockingMode)
+{
+    const SOCKET handle = create_native_socket();
+    ASSERT_NE(handle, INVALID_SOCKET);
+    Socket socket{handle};
+
+    EXPECT_FALSE(socket.set_nonblocking(true));
+    EXPECT_FALSE(socket.set_nonblocking(false));
+    EXPECT_TRUE(socket.valid());
+}
+
+TEST_F(SocketTest, NonblockingConfigurationReportsInvalidSocket)
+{
+    Socket socket;
+
+    const std::error_code error = socket.set_nonblocking(true);
+
+    EXPECT_EQ(error.value(), WSAENOTSOCK);
+    EXPECT_STREQ(error.category().name(), "winsock");
+}
 } // namespace
