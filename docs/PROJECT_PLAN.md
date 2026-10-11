@@ -37,7 +37,7 @@ TCP bytes
 
 - A frame is a 4-byte unsigned payload length in network byte order followed by a UTF-8 JSON payload.
 - Every request and response includes `"version": 1`.
-- The initial maximum payload is 64 KiB, represented by one named configurable constant.
+- The maximum payload is 64 KiB, represented by the named compile-time constant `max_payload_size_bytes`.
 - Request IDs use `std::uint64_t`. Every response includes the corresponding `request_id`.
 - Responses may complete and arrive out of order; clients correlate them using `request_id`.
 - Protocol errors contain a stable error code and a human-readable message.
@@ -119,23 +119,25 @@ telemetryhub_project_options (INTERFACE: C++20 and project warnings)
 |   |-- telemetryhub_winsock_runtime_tests (+ GTest::gtest_main)
 |   |-- telemetryhub_socket_tests (+ GTest::gtest_main)
 |   `-- telemetryhub_tcp_integration_tests (+ GTest::gtest_main)
+|-- telemetryhub_protocol
+|   `-- telemetryhub_message_framer_tests (+ GTest::gtest_main)
 |-- telemetry_server
 |-- device_simulator
 |-- telemetryhub_smoke_tests (+ GTest::gtest_main)
 `-- telemetryhub_concurrency_tests (+ GTest::gtest_main)
 ```
 
-Future reusable component libraries will link `telemetryhub_project_options`; executables and tests will link only the components they use. Third-party GoogleTest targets do not inherit project warning-as-error flags.
+Reusable component libraries link `telemetryhub_project_options`; executables and tests link only the components they use. `telemetryhub_protocol` contains transport-independent framing and does not link Winsock. Third-party GoogleTest targets do not inherit project warning-as-error flags.
 
 ## Risks and controls
 
-1. TCP has no message boundaries: incremental framing must handle partial and combined reads.
+1. TCP has no message boundaries: `MessageFramer` handles partial prefixes, partial payloads, and combined frames with bounded buffering.
 2. Bounded queues can deadlock shutdown: closure and stop-aware blocking operations are designed and tested first.
 3. Slow clients can exhaust memory: outbound queues are bounded and persistent overflow closes the connection.
 4. Concurrent writes can corrupt frames: each connection has exactly one coordinated writer.
 5. Responses race with disconnect/reconnect: stable connection IDs, not device IDs, control routing.
 6. Worker completion is unordered: request IDs provide correlation and ordering is explicitly not guaranteed.
-7. `std::stop_token` cannot interrupt Winsock by itself: local `shutdown()` alone did not release a pending receive in Milestone 2C testing. Reliable server-side interruption must be resolved before Milestone 4 shutdown can be considered complete.
+7. `std::stop_token` cannot interrupt Winsock by itself: local `shutdown()` alone did not release a pending receive in Milestone 2C testing. Milestone 2D addressed this with finite-timeout `WSAPoll()` waits and stop-aware I/O; Milestone 4 must retain this cancellation and join-before-close behavior.
 8. JSON validation has resource costs: frame size, nesting, field types, and numeric ranges require limits in Milestone 3.
 9. Fetching GoogleTest requires network access on a clean configure: its version is pinned for repeatability.
 
@@ -166,18 +168,18 @@ Milestone 2A adds only the platform resource foundation. `WinsockRuntime` is a n
 
 - Establish one localhost server connection and one client connection using `bind()`, `listen()`, `accept()`, and `connect()` with explicit Winsock error handling.
 - Complete a minimal `PING`/`PONG` exchange as raw bounded bytes, with helpers that handle partial writes and bounded reads without assuming TCP message boundaries.
-- Add deterministic localhost integration tests for connection establishment, complete writes, bounded reads, peer closure, and expected error paths. Active receive interruption is covered separately in Milestone 2C.
+- Add deterministic localhost integration tests for connection establishment, complete writes, bounded reads, peer closure, and expected error paths. Active receive interruption is covered by the Milestone 2D stop-aware I/O helpers.
 - Keep length-prefixed framing, JSON, typed protocol messages, request IDs, telemetry processing, worker-pool integration, client-session architecture, and application composition deferred to later milestones.
 - Exit: the one-server/one-client localhost exchange, bounded I/O behavior, error paths, and peer-closure tests pass repeatedly without external network access or leaked sockets/threads.
 
-Milestone 2B uses focused free functions rather than a server or session abstraction. Setup operations throw `std::system_error` with Winsock codes and operation context. `send_all()` succeeds only after the full byte span is written and otherwise reports both the sent prefix length and error. `receive_some()` reads no more than its nonempty caller-provided buffer and distinguishes data, graceful peer closure, and error. Buffer lengths are safely limited to Winsock's `int` range per call. The Milestone 2B transport began as blocking, IPv4-loopback-only I/O without cancellation; Milestone 2D replaces the I/O path with nonblocking sockets and stop-aware polling. Deterministically forcing a partial `send()` remains deferred to Milestone 3 complete-frame transmission work; the write loop handles it when Winsock returns one naturally.
+Milestone 2B uses focused free functions rather than a server or session abstraction. Setup operations throw `std::system_error` with Winsock codes and operation context. `send_all()` succeeds only after the full byte span is written and otherwise reports both the sent prefix length and error. `receive_some()` reads no more than its nonempty caller-provided buffer and distinguishes data, graceful peer closure, and error. Buffer lengths are safely limited to Winsock's `int` range per call. The Milestone 2B transport began as blocking, IPv4-loopback-only I/O without cancellation; Milestone 2D replaces the I/O path with nonblocking sockets and stop-aware polling. The complete-send loop handles partial `send()` results when Winsock returns them; tests use constrained buffers to exercise complete writes and backpressure.
 
 #### Milestone 2C - Foundation test hardening
 
 - Coordinate concurrency test actions with readiness signals rather than elapsed-time synchronization. Dedicated full/empty queue, worker backpressure, and synchronous shutdown checks retain a 20 ms noncompletion observation because the public APIs expose no internal wait-entry notification. Readiness immediately before an operation does not prove that its internal wait has begun.
 - Test pending localhost receive behavior with peer closure and peer `shutdown(SD_SEND)`. A local-shutdown-only experiment failed its two-second completion deadline on the tested Windows installation; peer closure released the reader during failure cleanup.
-- Exit: the full suite and repeated concurrency/TCP runs pass. Production interruptible I/O remains a later foundation change.
-- These tests demonstrate peer-driven receive interruption, not reliable local-only cancellation. Framing, JSON, and typed protocol behavior remain deferred to Milestone 3; sessions and coordinated server shutdown remain deferred to Milestone 4.
+- Exit: the full suite and repeated concurrency/TCP runs pass. Milestone 2D subsequently added production stop-aware polling I/O.
+- These tests demonstrate peer-driven receive interruption, not reliable local-only cancellation. Milestone 2D resolved local cancellation through finite-timeout polling. Binary framing is now Milestone 3A; JSON and typed protocol behavior remain for Milestone 3B. Sessions and coordinated server shutdown remain deferred to Milestone 4.
 
 #### Milestone 2D - Interruptible socket I/O foundation
 
@@ -189,8 +191,17 @@ Milestone 2B uses focused free functions rather than a server or session abstrac
 
 ### Milestone 3 - Message protocol
 
-- Implement the approved length-prefixed JSON protocol, request IDs, typed parsing/serialization, validation, and size limits.
-- Exit: protocol tests cover partial/combined frames, malformed data, oversize frames, UTF-8, and byte order without real sockets.
+#### Milestone 3A - Binary message framing (complete)
+
+- Implement transport-independent incremental framing with a four-byte unsigned big-endian payload length and a named 64 KiB maximum.
+- Provide complete-frame encoding and explicit errors for zero-length and oversized payloads. A fatal length error discards partial state, preserves frames completed earlier in that call, and permanently poisons the framer; later calls report `already_failed`.
+- Keep internal buffering bounded to one partial payload no larger than the limit. Framing does not depend on Winsock, JSON, or application logic.
+- Exit: deterministic no-socket unit tests cover fragmented prefixes and payloads, combined and incomplete frames, size boundaries, byte order, arbitrary binary preservation, and fatal error behavior.
+
+#### Milestone 3B - JSON message protocol (not started)
+
+- Implement the approved JSON message schema, protocol version, request IDs, typed parsing/serialization, validation, and size limits.
+- Exit: protocol tests cover malformed JSON, UTF-8, versions, typed field validation, and serialization without real sockets.
 
 ### Milestone 4 - Multiple clients
 

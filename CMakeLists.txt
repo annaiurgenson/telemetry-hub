@@ -45,6 +45,17 @@ target_link_libraries(
         ws2_32
 )
 
+add_library(
+    telemetryhub_protocol
+    src/protocol/message_framer.cpp
+)
+target_include_directories(
+    telemetryhub_protocol
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(telemetryhub_protocol PUBLIC telemetryhub_project_options)
+
 add_executable(telemetry_server apps/telemetry_server/main.cpp)
 target_link_libraries(telemetry_server PRIVATE telemetryhub_project_options)
 
