@@ -119,3 +119,20 @@ target_link_libraries(
         GTest::gtest_main
 )
 gtest_discover_tests(telemetryhub_message_codec_tests PROPERTIES TIMEOUT 10)
+
+add_executable(
+    telemetryhub_tcp_server_integration_tests
+    integration/tcp_server_test.cpp
+)
+target_link_libraries(
+    telemetryhub_tcp_server_integration_tests
+    PRIVATE
+        telemetryhub_network
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(
+    telemetryhub_tcp_server_integration_tests
+    PROPERTIES
+        TIMEOUT 10
+)

@@ -23,7 +23,7 @@ TCP bytes
 ```
 
 - **Platform/networking:** `WinsockRuntime`, move-only `Socket`, and `TcpServer` own platform resources through RAII.
-- **Connection lifecycle:** each TCP connection receives a server-generated `ConnectionId`, one reader thread, one bounded outbound queue, and one coordinated writer thread.
+- **Connection lifecycle:** `TcpServer` owns Winsock, the listener, and a registry keyed by server-generated `ConnectionId`. Each `ClientSession` owns one socket, one reader, one bounded outbound queue, and one coordinated writer thread. Session threads borrow the socket and never join or destroy their session.
 - **Wire protocol:** `MessageFramer` reconstructs frames from arbitrary TCP chunks. Serialization and parsing remain independent of Winsock.
 - **Command model:** a `std::variant` represents typed commands. `CommandEnvelope` carries request, connection, and registered-device context without owning a socket.
 - **Concurrency:** bounded queues provide backpressure. A fixed worker pool processes commands; workers never call `send()`.
@@ -63,14 +63,16 @@ TCP bytes
 - The processing path uses a bounded global incoming-command queue, a bounded completed-response queue when used, and one bounded outbound-message queue per connection.
 - Capacities are named configuration values; defaults will be proposed in the implementing milestone.
 - When the incoming queue is full, the server returns `SERVER_BUSY` when safe.
-- A persistently full outbound queue identifies a slow client; the server closes that connection instead of growing memory without bound.
+- Later overload handling will treat a persistently full outbound queue as a slow client and close that connection. Milestone 4A exposes stop-aware bounded enqueueing; the disconnect policy is deferred to 4C.
 
 ## Ownership, concurrency, and shutdown
 
 - Resource-owning handles are RAII-based and move-only where appropriate. There are no owning raw pointers or detached threads.
 - The initial I/O model is one accept thread, one reader and writer per connection, a fixed-size worker pool, and one dispatcher thread if the global completed-response queue is used.
 - Owned threads use `std::jthread` and `std::stop_token`. Response ordering within a connection is not guaranteed.
-- Future connection sockets are configured nonblocking. Per-connection I/O loops use finite-timeout `WSAPoll()` waits and check stop tokens between waits. The connection/session object retains socket ownership while reader and writer threads borrow the handle. Shutdown requests stop, joins the I/O threads, and only then closes the socket. Local `shutdown(SD_BOTH)` is not relied upon as the primary cancellation mechanism. Queues are closed according to their drain/cancel policy before their owning synchronization state is destroyed.
+- Connection sockets are configured nonblocking. Per-connection I/O loops use finite-timeout WSAPoll waits and check stop tokens between waits. TcpServer owns WinsockRuntime, the listener, and a mutex-protected registry of sessions; each ClientSession owns its socket while reader and writer threads borrow the handle. The accept thread removes completed sessions under the registry lock, then joins and destroys them without holding that lock. Shutdown closes enqueue admission, stops and joins acceptance, closes the listener, closes session outbound queues, and requests checked shutdown(SD_BOTH) on active sockets. Finite-timeout polling and stop tokens remain the reliable cancellation mechanism; local socket shutdown is an additional cooperative step. I/O threads are joined before session sockets are released. Shutdown then waits for all admitted enqueue operations to finish before releasing its session owners and Winsock.
+- Lock order is lifecycle_mutex_ then enqueue_mutex_ only for start/shutdown admission transitions. Enqueue admission releases enqueue_mutex_ before looking up a session under registry_mutex_; these locks are never nested. No lifecycle or registry lock is held during queue waits, thread joins, or the in-flight operation barrier wait.
+- Public operations, including enqueue() and shutdown(), may overlap. The owning TcpServer must outlive every public operation; destruction must not overlap an external call. Concurrent shutdown calls are idempotent, and restart is allowed after shutdown completes.
 - Startup or unrecoverable configuration failures may throw exceptions such as `std::system_error`.
 - Expected connection-level network errors close only the affected connection. Protocol validation normally produces typed errors rather than cross-layer exceptions.
 - Every thread-entry boundary catches all exceptions; none may escape a thread function.
@@ -118,7 +120,8 @@ telemetryhub_project_options (INTERFACE: C++20 and project warnings)
 |-- telemetryhub_network (privately links ws2_32)
 |   |-- telemetryhub_winsock_runtime_tests (+ GTest::gtest_main)
 |   |-- telemetryhub_socket_tests (+ GTest::gtest_main)
-|   `-- telemetryhub_tcp_integration_tests (+ GTest::gtest_main)
+|   |-- telemetryhub_tcp_integration_tests (+ GTest::gtest_main)
+|   `-- telemetryhub_tcp_server_integration_tests (+ GTest::gtest_main)
 |-- telemetryhub_protocol
 |   |-- telemetryhub_message_framer_tests (+ GTest::gtest_main)
 |   `-- telemetryhub_message_codec_tests (+ GTest::gtest_main)
@@ -138,7 +141,7 @@ Reusable component libraries link `telemetryhub_project_options`; executables an
 4. Concurrent writes can corrupt frames: each connection has exactly one coordinated writer.
 5. Responses race with disconnect/reconnect: stable connection IDs, not device IDs, control routing.
 6. Worker completion is unordered: request IDs provide correlation and ordering is explicitly not guaranteed.
-7. `std::stop_token` cannot interrupt Winsock by itself: local `shutdown()` alone did not release a pending receive in Milestone 2C testing. Milestone 2D addressed this with finite-timeout `WSAPoll()` waits and stop-aware I/O; Milestone 4 must retain this cancellation and join-before-close behavior.
+7. `std::stop_token` cannot interrupt Winsock by itself: local `shutdown()` alone did not release a pending receive in Milestone 2C testing. Milestone 2D addressed this with finite-timeout `WSAPoll()` waits and stop-aware I/O; Milestone 4A retains this cancellation and join-before-close behavior.
 8. JSON parsing has resource costs: framing and codec entry points cap payloads at 64 KiB; parser callbacks cap nesting at 16 and object members at 16; typed validation checks field and numeric constraints.
 9. Fetching GoogleTest and nlohmann/json requires network access on a clean configure; both dependencies are version/hash pinned.
 
@@ -161,7 +164,7 @@ Milestone 1B adds a fixed-size general-purpose `WorkerPool`. It stores move-only
 ### Milestone 2 - Basic TCP communication
 
 - Add Winsock RAII, a move-only socket, and one-server/one-client `PING`/`PONG` communication.
-- Exit: raw localhost exchange, bounded reads, complete-write results, resource ownership, error paths, and receive interruption followed by join-before-close cleanup are demonstrated. Production session shutdown remains deferred to Milestone 4.
+- Exit: raw localhost exchange, bounded reads, complete-write results, resource ownership, error paths, and receive interruption followed by join-before-close cleanup are demonstrated. Production session shutdown is implemented in Milestone 4A.
 
 Milestone 2A adds only the platform resource foundation. `WinsockRuntime` is a non-copyable and non-movable lexical guard that requests Winsock 2.2 and balances each successful `WSAStartup` with one `WSACleanup`. `Socket` is a move-only owner of one `SOCKET`; explicit `close()` and `reset()` return a Winsock-category `std::error_code`, preserve ownership on close failure, and never throw from destruction. Move assignment reports failure to close its prior handle with `std::system_error`. No socket communication or application integration is included.
 
@@ -180,7 +183,7 @@ Milestone 2B uses focused free functions rather than a server or session abstrac
 - Coordinate concurrency test actions with readiness signals rather than elapsed-time synchronization. Dedicated full/empty queue, worker backpressure, and synchronous shutdown checks retain a 20 ms noncompletion observation because the public APIs expose no internal wait-entry notification. Readiness immediately before an operation does not prove that its internal wait has begun.
 - Test pending localhost receive behavior with peer closure and peer `shutdown(SD_SEND)`. A local-shutdown-only experiment failed its two-second completion deadline on the tested Windows installation; peer closure released the reader during failure cleanup.
 - Exit: the full suite and repeated concurrency/TCP runs pass. Milestone 2D subsequently added production stop-aware polling I/O.
-- These tests demonstrate peer-driven receive interruption, not reliable local-only cancellation. Milestone 2D resolved local cancellation through finite-timeout polling. Milestones 3A and 3B now provide binary framing and typed JSON protocol behavior. Sessions and coordinated server shutdown remain deferred to Milestone 4.
+- These tests demonstrate peer-driven receive interruption, not reliable local-only cancellation. Milestone 2D resolved local cancellation through finite-timeout polling. Milestones 3A and 3B provide binary framing and typed JSON protocol behavior. Milestone 4A now supplies the TCP session lifecycle while continuing to use finite-timeout polling and join-before-close ownership.
 
 #### Milestone 2D - Interruptible socket I/O foundation
 
@@ -212,8 +215,17 @@ Milestone 2B uses focused free functions rather than a server or session abstrac
 
 ### Milestone 4 - Multiple clients
 
-- Add sessions, the connection registry, incoming queue, per-client I/O threads and outbound queues, and overload/disconnect handling.
-- Exit: integration tests exercise concurrent clients, registration conflicts, reconnects, malformed clients, and shutdown.
+#### Milestone 4A - TCP server and connection lifecycle (complete)
+
+- `TcpServer` owns the Winsock runtime and a nonblocking IPv4-loopback listener. One owned accept `std::jthread` uses finite-timeout `WSAPoll()` and reaps completed sessions outside registry locks.
+- Each `ClientSession` owns its accepted `Socket`, one bounded queue of owned outbound byte buffers, and one reader and one writer `std::jthread`. I/O threads borrow the socket, catch all exceptions at their entry boundary, and never join or destroy the session.
+- `ConnectionId` wraps `std::uint64_t`; IDs increase monotonically for the lifetime of a `TcpServer`, including restart after shutdown. Exhaustion prevents further acceptance rather than wrapping. The configured maximum active-connection count defaults to 64. Each outbound buffer is capped at 65,540 bytes by default, enough for one maximum framed protocol message; queue memory is bounded by queue capacity multiplied by that byte limit.
+- Shutdown closes enqueue admission before publishing its stopping state. It joins acceptance and session I/O without holding lifecycle or registry locks, closes outbound queues to wake blocked enqueues, and waits for every admitted enqueue to release its session reference before releasing session sockets or Winsock. It also calls checked shutdown(SD_BOTH) on active session sockets; stop tokens and finite-timeout polling remain the primary reliable cancellation path. Unexpected shutdown errors retain their Winsock code for TcpServer::shutdown_error().
+- shutdown() may overlap public operations, including enqueue calls and other shutdown calls. The object must outlive those calls; destruction must not overlap a public call. Calls after shutdown admission closes return EnqueueStatus::closed; already admitted calls finish as the queue closes.
+- Until protocol integration, the reader uses a fixed 4 KiB receive buffer and discards received application bytes. `TcpServer::enqueue()` is the production interface for sending already encoded owned bytes; it waits for bounded queue capacity and accepts a stop token. Stopping a session cancels unsent queued buffers.
+- Exit: localhost integration tests cover start/stop, concurrent clients, unique IDs, connection-limit rejection, peer-close reaping, writer delivery, idle cancellation, enqueue admission after shutdown begins, enqueue blocked by a full outbound queue, enqueue/disconnect/reaping/shutdown races, active reader/writer shutdown, peer closure before local shutdown, concurrent shutdown calls, and restart cycles.
+
+Milestone 4B will add protocol framing/codec integration and bounded incoming command handling. Milestone 4C will add registration, routing, overload, and disconnect behavior. Neither is part of 4A.
 
 ### Milestone 5 - Telemetry processing
 

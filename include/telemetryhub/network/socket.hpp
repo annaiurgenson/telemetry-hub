@@ -28,6 +28,10 @@ public:
     // Configure before starting any threads that borrow the handle.
     [[nodiscard]] std::error_code set_nonblocking(bool enabled) noexcept;
 
+    // Request cooperative shutdown without releasing the handle. The owner
+    // must still join every thread borrowing this socket before close().
+    [[nodiscard]] std::error_code shutdown(int how) const noexcept;
+
     // A replacement is adopted only if closing the current handle succeeds.
     // On failure, this Socket retains its current handle; the caller retains
     // ownership of replacement, which is neither closed nor adopted.

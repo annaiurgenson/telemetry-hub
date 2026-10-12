@@ -48,6 +48,20 @@ std::error_code Socket::set_nonblocking(const bool enabled) noexcept
     }
     return {};
 }
+
+std::error_code Socket::shutdown(const int how) const noexcept
+{
+    if (!valid())
+    {
+        return make_winsock_error_code(WSAENOTSOCK);
+    }
+    if (::shutdown(handle_, how) == SOCKET_ERROR)
+    {
+        return make_winsock_error_code(WSAGetLastError());
+    }
+    return {};
+}
+
 bool Socket::valid() const noexcept
 {
     return handle_ != invalid_handle;

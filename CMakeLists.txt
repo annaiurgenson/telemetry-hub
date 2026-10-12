@@ -30,6 +30,8 @@ add_library(
     telemetryhub_network
     src/network/socket.cpp
     src/network/tcp.cpp
+    src/network/client_session.cpp
+    src/network/tcp_server.cpp
     src/network/winsock_error.cpp
     src/network/winsock_runtime.cpp
 )
