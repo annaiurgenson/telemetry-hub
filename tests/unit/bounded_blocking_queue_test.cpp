@@ -367,6 +367,19 @@ TEST(BoundedBlockingQueue, CloseIsIdempotent)
     EXPECT_EQ(queue.pop().status, QueueOperationStatus::closed);
 }
 
+TEST(BoundedBlockingQueue, TryPushDistinguishesSuccessFullAndClosed)
+{
+    BoundedBlockingQueue<int> queue{1U};
+
+    EXPECT_EQ(queue.try_push(7), QueueOperationStatus::success);
+    EXPECT_EQ(queue.try_push(8), QueueOperationStatus::full);
+    const auto popped = queue.pop();
+    ASSERT_TRUE(popped.value.has_value());
+    EXPECT_EQ(*popped.value, 7);
+    queue.close();
+    EXPECT_EQ(queue.try_push(9), QueueOperationStatus::closed);
+}
+
 TEST(BoundedBlockingQueue, IsSafelyDestroyedAfterParticipatingThreadsStop)
 {
     {

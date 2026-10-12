@@ -17,10 +17,14 @@ ClientSession::ClientSession(
     const ConnectionId id,
     Socket socket,
     const std::size_t outbound_capacity,
-    const std::size_t max_outbound_buffer_size_bytes)
+    const std::size_t max_outbound_buffer_size_bytes,
+    const std::chrono::milliseconds terminal_flush_timeout,
+    SessionCallbacks callbacks)
     : id_{id},
       socket_{std::move(socket)},
       max_outbound_buffer_size_bytes_{max_outbound_buffer_size_bytes},
+      terminal_flush_timeout_{terminal_flush_timeout},
+      callbacks_{std::move(callbacks)},
       outbound_{outbound_capacity}
 {
 }
@@ -48,6 +52,7 @@ void ClientSession::start()
             reader_.join();
         }
         remaining_threads_.store(0U);
+        notify_disconnected();
         completed_.store(true);
         throw;
     }
@@ -118,13 +123,56 @@ EnqueueStatus ClientSession::enqueue(
     case concurrency::QueueOperationStatus::cancelled:
         return EnqueueStatus::cancelled;
     case concurrency::QueueOperationStatus::closed:
+    case concurrency::QueueOperationStatus::full:
         return EnqueueStatus::closed;
     }
     return EnqueueStatus::closed;
 }
 
+bool ClientSession::queue_output(SessionOutput output, const std::stop_token stop_token)
+{
+    for (auto& item : output.outbound)
+    {
+        if (item.bytes.size() > max_outbound_buffer_size_bytes_)
+        {
+            request_stop();
+            return false;
+        }
+
+        if (item.admission == OutboundAdmission::try_once)
+        {
+            if (outbound_.try_push(std::move(item.bytes)) != concurrency::QueueOperationStatus::success)
+            {
+                request_stop();
+                return false;
+            }
+        }
+        else if (enqueue(std::move(item.bytes), stop_token) != EnqueueStatus::accepted)
+        {
+            request_stop();
+            return false;
+        }
+    }
+
+    if (output.close_mode == SessionCloseMode::close_now)
+    {
+        request_stop();
+        return false;
+    }
+    if (output.close_mode == SessionCloseMode::close_after_flush)
+    {
+        const auto deadline = std::chrono::steady_clock::now() + terminal_flush_timeout_;
+        flush_deadline_ticks_.store(
+            static_cast<std::int64_t>(deadline.time_since_epoch().count()), std::memory_order_release);
+        outbound_.close();
+        return false;
+    }
+    return true;
+}
+
 void ClientSession::reader_loop(const std::stop_token stop_token) noexcept
 {
+    bool flushing = false;
     try
     {
         std::array<std::byte, receive_buffer_size> buffer{};
@@ -135,13 +183,27 @@ void ClientSession::reader_loop(const std::stop_token stop_token) noexcept
             {
                 break;
             }
-            // Milestone 4A deliberately discards application bytes until 4B adds protocol processing.
+            if (callbacks_.on_bytes)
+            {
+                SessionOutput output = callbacks_.on_bytes(
+                    id_, std::span<const std::byte>{buffer.data(), result.bytes_transferred});
+                const SessionCloseMode close_mode = output.close_mode;
+                if (!queue_output(std::move(output), stop_token))
+                {
+                    flushing = close_mode == SessionCloseMode::close_after_flush &&
+                               !stop_source_.stop_requested();
+                    break;
+                }
+            }
         }
     }
     catch (...)
     {
     }
-    request_stop();
+    if (!flushing)
+    {
+        request_stop();
+    }
     thread_finished();
 }
 
@@ -157,8 +219,9 @@ void ClientSession::writer_loop(const std::stop_token stop_token) noexcept
                 break;
             }
 
-            const SendResult result = send_all(socket_, *item.value, stop_token);
-            if (result.error || result.cancelled)
+            const SendResult result = send_all(
+                socket_, *item.value, stop_token, std::nullopt, &flush_deadline_ticks_);
+            if (result.error || result.cancelled || result.timed_out)
             {
                 break;
             }
@@ -171,10 +234,29 @@ void ClientSession::writer_loop(const std::stop_token stop_token) noexcept
     thread_finished();
 }
 
+void ClientSession::notify_disconnected() noexcept
+{
+    if (disconnected_notified_.exchange(true))
+    {
+        return;
+    }
+    if (callbacks_.on_disconnected)
+    {
+        try
+        {
+            callbacks_.on_disconnected(id_);
+        }
+        catch (...)
+        {
+        }
+    }
+}
+
 void ClientSession::thread_finished() noexcept
 {
     if (remaining_threads_.fetch_sub(1U) == 1U)
     {
+        notify_disconnected();
         completed_.store(true);
     }
 }

@@ -10,6 +10,24 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(googletest)
 
+add_executable(
+    telemetryhub_protocol_session_integration_tests
+    integration/protocol_session_test.cpp
+)
+target_link_libraries(
+    telemetryhub_protocol_session_integration_tests
+    PRIVATE
+        telemetryhub_server
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+include(GoogleTest)
+
+gtest_discover_tests(
+    telemetryhub_protocol_session_integration_tests
+    PROPERTIES
+        TIMEOUT 15
+)
 add_executable(telemetryhub_smoke_tests smoke_test.cpp)
 target_link_libraries(
     telemetryhub_smoke_tests
@@ -18,7 +36,7 @@ target_link_libraries(
         GTest::gtest_main
 )
 
-include(GoogleTest)
+
 gtest_discover_tests(telemetryhub_smoke_tests)
 
 add_executable(

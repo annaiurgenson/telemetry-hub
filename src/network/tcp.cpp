@@ -4,6 +4,7 @@
 
 #include <winsock2.h>
 
+#include <algorithm>
 #include <limits>
 #include <string>
 #include <string_view>
@@ -163,14 +164,40 @@ SocketWaitResult wait_for_socket(
 SendResult send_all(
     const Socket& socket,
     const std::span<const std::byte> bytes,
-    const std::stop_token stop_token) noexcept
+    const std::stop_token stop_token,
+    const std::optional<std::chrono::steady_clock::time_point> deadline,
+    const std::atomic<std::int64_t>* dynamic_deadline_ticks) noexcept
 {
+    const auto current_deadline = [deadline, dynamic_deadline_ticks]() noexcept {
+        auto result = deadline;
+        if (dynamic_deadline_ticks != nullptr)
+        {
+            const std::int64_t ticks = dynamic_deadline_ticks->load(std::memory_order_acquire);
+            if (ticks != 0)
+            {
+                using Clock = std::chrono::steady_clock;
+                const auto dynamic = Clock::time_point{Clock::duration{
+                    static_cast<Clock::duration::rep>(ticks)}};
+                if (!result.has_value() || dynamic < *result)
+                {
+                    result = dynamic;
+                }
+            }
+        }
+        return result;
+    };
+
     std::size_t total_sent = 0U;
     while (total_sent < bytes.size())
     {
         if (stop_token.stop_requested())
         {
-            return {total_sent, {}, true};
+            return {total_sent, {}, true, false};
+        }
+        const auto limit = current_deadline();
+        if (limit.has_value() && std::chrono::steady_clock::now() >= *limit)
+        {
+            return {total_sent, {}, false, true};
         }
 
         const int chunk_size = winsock_buffer_size(bytes.size() - total_sent);
@@ -184,15 +211,27 @@ SendResult send_all(
             const int error = WSAGetLastError();
             if (error == WSAEWOULDBLOCK)
             {
+                auto wait_timeout = default_socket_poll_interval;
+                const auto refreshed_limit = current_deadline();
+                if (refreshed_limit.has_value())
+                {
+                    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        *refreshed_limit - std::chrono::steady_clock::now());
+                    if (remaining.count() <= 0)
+                    {
+                        return {total_sent, {}, false, true};
+                    }
+                    wait_timeout = (std::min)(wait_timeout, remaining);
+                }
                 const SocketWaitResult wait =
-                    wait_for_socket(socket, SocketWaitInterest::write, stop_token);
+                    wait_for_socket(socket, SocketWaitInterest::write, stop_token, wait_timeout);
                 if (wait.status == SocketWaitStatus::cancelled)
                 {
-                    return {total_sent, {}, true};
+                    return {total_sent, {}, true, false};
                 }
                 if (wait.status == SocketWaitStatus::error)
                 {
-                    return {total_sent, wait.error, false};
+                    return {total_sent, wait.error, false, false};
                 }
                 continue;
             }
@@ -200,15 +239,15 @@ SendResult send_all(
             {
                 continue;
             }
-            return {total_sent, make_winsock_error_code(error), false};
+            return {total_sent, make_winsock_error_code(error), false, false};
         }
         if (sent == 0)
         {
-            return {total_sent, make_winsock_error_code(WSAECONNABORTED), false};
+            return {total_sent, make_winsock_error_code(WSAECONNABORTED), false, false};
         }
         total_sent += static_cast<std::size_t>(sent);
     }
-    return {total_sent, {}, false};
+    return {total_sent, {}, false, false};
 }
 ReceiveResult receive_some(
     const Socket& socket,

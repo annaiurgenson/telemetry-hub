@@ -2,9 +2,11 @@
 
 #include <telemetryhub/network/socket.hpp>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <span>
 #include <stop_token>
 #include <system_error>
@@ -16,6 +18,7 @@ struct SendResult
     std::size_t bytes_transferred;
     std::error_code error;
     bool cancelled{};
+    bool timed_out{};
 };
 
 enum class ReceiveStatus
@@ -75,7 +78,9 @@ void connect_loopback(const Socket& socket, std::uint16_t port);
 [[nodiscard]] SendResult send_all(
     const Socket& socket,
     std::span<const std::byte> bytes,
-    std::stop_token stop_token) noexcept;
+    std::stop_token stop_token,
+    std::optional<std::chrono::steady_clock::time_point> deadline = std::nullopt,
+    const std::atomic<std::int64_t>* dynamic_deadline_ticks = nullptr) noexcept;
 
 // Reads at most buffer.size() bytes. A nonempty buffer is required.
 [[nodiscard]] ReceiveResult receive_some(

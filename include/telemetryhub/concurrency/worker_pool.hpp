@@ -78,6 +78,8 @@ auto WorkerPool::submit(F&& callable, const std::stop_token stop_token)
     {
     case QueueOperationStatus::success:
         return {SubmitStatus::accepted, std::move(future)};
+    case QueueOperationStatus::full:
+        return {SubmitStatus::closed, std::nullopt};
     case QueueOperationStatus::closed:
         return {SubmitStatus::closed, std::nullopt};
     case QueueOperationStatus::cancelled:

@@ -39,6 +39,10 @@ public:
         {
             throw std::invalid_argument{"TcpServer outbound queue capacity must be positive"};
         }
+        if (config_.terminal_flush_timeout.count() <= 0)
+        {
+            throw std::invalid_argument{"TcpServer terminal flush timeout must be positive"};
+        }
     }
 
     ~Impl() noexcept
@@ -338,9 +342,23 @@ private:
                 }
             }
 
+            SessionCallbacks callbacks;
+            try
+            {
+                if (config_.session_callbacks_factory)
+                {
+                    callbacks = config_.session_callbacks_factory(ConnectionId{id_value});
+                }
+            }
+            catch (...)
+            {
+                continue;
+            }
+
             auto session = std::make_shared<ClientSession>(
                 ConnectionId{id_value}, std::move(accepted), config_.outbound_queue_capacity,
-                config_.max_outbound_buffer_size_bytes);
+                config_.max_outbound_buffer_size_bytes, config_.terminal_flush_timeout,
+                std::move(callbacks));
             session->start();
             {
                 std::lock_guard registry_lock{registry_mutex_};

@@ -74,8 +74,26 @@ target_link_libraries(
         nlohmann_json::nlohmann_json
 )
 
+add_library(
+    telemetryhub_server
+    src/server/device_registration_registry.cpp
+    src/server/protocol_session_handler.cpp
+)
+target_include_directories(
+    telemetryhub_server
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(
+    telemetryhub_server
+    PUBLIC
+        telemetryhub_network
+        telemetryhub_protocol
+        telemetryhub_project_options
+)
+
 add_executable(telemetry_server apps/telemetry_server/main.cpp)
-target_link_libraries(telemetry_server PRIVATE telemetryhub_project_options)
+target_link_libraries(telemetry_server PRIVATE telemetryhub_server)
 
 add_executable(device_simulator apps/device_simulator/main.cpp)
 target_link_libraries(device_simulator PRIVATE telemetryhub_project_options)

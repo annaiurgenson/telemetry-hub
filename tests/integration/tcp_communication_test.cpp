@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <atomic>
 #include <array>
 #include <chrono>
 #include <exception>
@@ -462,6 +463,41 @@ TEST_F(TcpCommunicationTest, WriterCancellationWhenPeerDoesNotConsumeData)
     EXPECT_FALSE(sockets.server.close());
 }
 
+TEST_F(TcpCommunicationTest, DynamicDeadlineInterruptsAnAlreadyBackpressuredSend)
+{
+    using namespace std::chrono_literals;
+    ConnectedSockets sockets = make_connected_sockets();
+    int receive_buffer_size = 1024;
+    ASSERT_EQ(setsockopt(
+        sockets.server.native_handle(), SOL_SOCKET, SO_RCVBUF,
+        reinterpret_cast<const char*>(&receive_buffer_size),
+        static_cast<int>(sizeof(receive_buffer_size))), 0);
+    saturate_send_buffer(sockets.client);
+
+    std::atomic<std::int64_t> deadline_ticks{0};
+    std::promise<void> entered;
+    auto entered_future = entered.get_future();
+    std::promise<telemetryhub::network::SendResult> completion;
+    auto completed = completion.get_future();
+    std::jthread writer{[&] {
+        entered.set_value();
+        const std::vector<std::byte> extra(16U * 1024U * 1024U, std::byte{'D'});
+        completion.set_value(send_all(
+            sockets.client, extra, {}, std::nullopt, &deadline_ticks));
+    }};
+
+    ASSERT_EQ(entered_future.wait_for(2s), std::future_status::ready);
+    const auto deadline = std::chrono::steady_clock::now() + 100ms;
+    deadline_ticks.store(
+        static_cast<std::int64_t>(deadline.time_since_epoch().count()), std::memory_order_release);
+    ASSERT_EQ(completed.wait_for(1s), std::future_status::ready);
+    const auto result = completed.get();
+    writer.join();
+    EXPECT_TRUE(result.timed_out);
+    EXPECT_FALSE(result.error);
+    EXPECT_FALSE(sockets.client.close());
+    EXPECT_FALSE(sockets.server.close());
+}
 TEST_F(TcpCommunicationTest, ReaderAndWriterExitBeforeOwnerClosesSocket)
 {
     using namespace std::chrono_literals;

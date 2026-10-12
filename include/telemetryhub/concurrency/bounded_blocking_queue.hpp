@@ -14,6 +14,7 @@ namespace telemetryhub::concurrency {
 enum class QueueOperationStatus
 {
     success,
+    full,
     closed,
     cancelled
 };
@@ -60,6 +61,25 @@ public:
         if (closed_)
         {
             return QueueOperationStatus::closed;
+        }
+
+        queue_.push_back(std::move(value));
+        lock.unlock();
+        not_empty_.notify_one();
+        return QueueOperationStatus::success;
+    }
+
+    // Attempts one admission without waiting for queue capacity.
+    [[nodiscard]] QueueOperationStatus try_push(T value)
+    {
+        std::unique_lock lock{mutex_};
+        if (closed_)
+        {
+            return QueueOperationStatus::closed;
+        }
+        if (queue_.size() >= capacity_)
+        {
+            return QueueOperationStatus::full;
         }
 
         queue_.push_back(std::move(value));
