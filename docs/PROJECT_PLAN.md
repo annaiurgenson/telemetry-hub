@@ -120,14 +120,15 @@ telemetryhub_project_options (INTERFACE: C++20 and project warnings)
 |   |-- telemetryhub_socket_tests (+ GTest::gtest_main)
 |   `-- telemetryhub_tcp_integration_tests (+ GTest::gtest_main)
 |-- telemetryhub_protocol
-|   `-- telemetryhub_message_framer_tests (+ GTest::gtest_main)
+|   |-- telemetryhub_message_framer_tests (+ GTest::gtest_main)
+|   `-- telemetryhub_message_codec_tests (+ GTest::gtest_main)
 |-- telemetry_server
 |-- device_simulator
 |-- telemetryhub_smoke_tests (+ GTest::gtest_main)
 `-- telemetryhub_concurrency_tests (+ GTest::gtest_main)
 ```
 
-Reusable component libraries link `telemetryhub_project_options`; executables and tests link only the components they use. `telemetryhub_protocol` contains transport-independent framing and does not link Winsock. Third-party GoogleTest targets do not inherit project warning-as-error flags.
+Reusable component libraries link `telemetryhub_project_options`; executables and tests link only the components they use. `telemetryhub_protocol` contains transport-independent framing and JSON parsing/serialization; nlohmann/json is private to this target, which does not link Winsock. Third-party GoogleTest targets do not inherit project warning-as-error flags.
 
 ## Risks and controls
 
@@ -138,8 +139,8 @@ Reusable component libraries link `telemetryhub_project_options`; executables an
 5. Responses race with disconnect/reconnect: stable connection IDs, not device IDs, control routing.
 6. Worker completion is unordered: request IDs provide correlation and ordering is explicitly not guaranteed.
 7. `std::stop_token` cannot interrupt Winsock by itself: local `shutdown()` alone did not release a pending receive in Milestone 2C testing. Milestone 2D addressed this with finite-timeout `WSAPoll()` waits and stop-aware I/O; Milestone 4 must retain this cancellation and join-before-close behavior.
-8. JSON validation has resource costs: frame size, nesting, field types, and numeric ranges require limits in Milestone 3.
-9. Fetching GoogleTest requires network access on a clean configure: its version is pinned for repeatability.
+8. JSON parsing has resource costs: framing and codec entry points cap payloads at 64 KiB; parser callbacks cap nesting at 16 and object members at 16; typed validation checks field and numeric constraints.
+9. Fetching GoogleTest and nlohmann/json requires network access on a clean configure; both dependencies are version/hash pinned.
 
 ## Milestones and exit criteria
 
@@ -179,7 +180,7 @@ Milestone 2B uses focused free functions rather than a server or session abstrac
 - Coordinate concurrency test actions with readiness signals rather than elapsed-time synchronization. Dedicated full/empty queue, worker backpressure, and synchronous shutdown checks retain a 20 ms noncompletion observation because the public APIs expose no internal wait-entry notification. Readiness immediately before an operation does not prove that its internal wait has begun.
 - Test pending localhost receive behavior with peer closure and peer `shutdown(SD_SEND)`. A local-shutdown-only experiment failed its two-second completion deadline on the tested Windows installation; peer closure released the reader during failure cleanup.
 - Exit: the full suite and repeated concurrency/TCP runs pass. Milestone 2D subsequently added production stop-aware polling I/O.
-- These tests demonstrate peer-driven receive interruption, not reliable local-only cancellation. Milestone 2D resolved local cancellation through finite-timeout polling. Binary framing is now Milestone 3A; JSON and typed protocol behavior remain for Milestone 3B. Sessions and coordinated server shutdown remain deferred to Milestone 4.
+- These tests demonstrate peer-driven receive interruption, not reliable local-only cancellation. Milestone 2D resolved local cancellation through finite-timeout polling. Milestones 3A and 3B now provide binary framing and typed JSON protocol behavior. Sessions and coordinated server shutdown remain deferred to Milestone 4.
 
 #### Milestone 2D - Interruptible socket I/O foundation
 
@@ -198,10 +199,16 @@ Milestone 2B uses focused free functions rather than a server or session abstrac
 - Keep internal buffering bounded to one partial payload no larger than the limit. Framing does not depend on Winsock, JSON, or application logic.
 - Exit: deterministic no-socket unit tests cover fragmented prefixes and payloads, combined and incomplete frames, size boundaries, byte order, arbitrary binary preservation, and fatal error behavior.
 
-#### Milestone 3B - JSON message protocol (not started)
+#### Milestone 3B - JSON protocol and typed messages (complete)
 
-- Implement the approved JSON message schema, protocol version, request IDs, typed parsing/serialization, validation, and size limits.
-- Exit: protocol tests cover malformed JSON, UTF-8, versions, typed field validation, and serialization without real sockets.
+- `telemetryhub_protocol` privately uses nlohmann/json v3.12.0 from the official `json.tar.xz` v3.12.0 release, pinned by SHA-256 `42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa`. JSON types do not appear in public headers.
+- `MessageCodec` parses and serializes complete payloads independently of Winsock, sessions, concurrency, and domain processing. It accepts and returns payload bytes and reuses the framing layer's 64 KiB limit; it does not duplicate framing or add `ConnectionId` routing.
+- Version is the JSON integer `1`. `request_id` and statistics `sample_count` are canonical decimal strings mapped to `std::uint64_t`, including the full `UINT64_MAX` range. All responses contain `version`, `request_id`, and exactly one of `result` or `error`. Every success result has a `type`; success booleans are not used.
+- Request objects have exactly these fields by command: `PING` (`version`, `request_id`, `command`); `REGISTER_DEVICE` adds `device_id`; `SUBMIT_TELEMETRY` adds `metric` and finite numeric `value`; `GET_STATISTICS` adds `metric`.
+- Success response result objects: `PONG` (`type`); `DEVICE_REGISTERED` (`type`, `device_id`); `TELEMETRY_ACCEPTED` (`type`); `STATISTICS` (`type`, `metric`, string `sample_count`, finite `minimum`, `maximum`, `mean`, `last_value`, and `last_received_at`). Error objects contain stable uppercase `code` and human-readable `message`. Domain processing supplies domain error codes later; the codec validates and transports them without implementing domain rules.
+- Reject duplicate, unknown, missing, and wrongly typed fields; non-integer or unsupported versions; invalid or noncanonical IDs; malformed JSON, comments, trailing commas/content; invalid UTF-8; and raw NUL bytes anywhere in the provided byte span. Identifiers are nonempty, control-free UTF-8 strings no longer than 128 bytes. Error codes are nonempty uppercase ASCII letters/digits/underscores; error messages are nonempty valid UTF-8 without NUL, and `last_received_at` is an RFC 3339 UTC timestamp with millisecond precision. Parsing enforces a maximum nesting depth of 16 and at most 16 members per object through parser callbacks. Codec entry points enforce the 65,536-byte payload cap independently of the framer.
+- JSON/input errors (including syntax, UTF-8, duplicate-key, and resource-limit failures) are separate from protocol validation errors and later domain errors. Validation errors preserve an optional request ID only when it is a canonical uint64 decimal value; the codec never invents correlation.
+- Exit: deterministic socket-free tests cover all message variants, round-trips, uint64 boundaries, size/depth/member limits, UTF-8/NUL, duplicates, field validation, malformed JSON, finite numeric values, outgoing validation, and error correlation.
 
 ### Milestone 4 - Multiple clients
 
@@ -224,7 +231,6 @@ These remain intentionally deferred until their implementing milestone:
 
 - Default capacities and exact full-queue wait thresholds.
 - Worker-count default and shutdown drain-versus-cancel policy for each queue.
-- Concrete JSON library and detailed command/response field schema.
-- Numeric acceptance rules and arithmetic-mean precision/overflow strategy.
+- Numeric acceptance rules and arithmetic-mean precision/overflow strategy for domain statistics.
 - Socket timeouts and the exact slow-client disconnect threshold.
 - Logger output destination and formatting.

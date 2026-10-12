@@ -8,6 +8,7 @@ project(
 )
 
 include(CTest)
+include(FetchContent)
 include(cmake/CompilerWarnings.cmake)
 
 add_library(telemetryhub_project_options INTERFACE)
@@ -45,16 +46,31 @@ target_link_libraries(
         ws2_32
 )
 
+FetchContent_Declare(
+    nlohmann_json
+    URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+    URL_HASH SHA256=42f6e95cad6ec532fd372391373363b62a14af6d771056dbfc86160e6dfff7aa
+    DOWNLOAD_EXTRACT_TIMESTAMP TRUE
+)
+FetchContent_MakeAvailable(nlohmann_json)
+
 add_library(
     telemetryhub_protocol
     src/protocol/message_framer.cpp
+    src/protocol/message_codec.cpp
 )
 target_include_directories(
     telemetryhub_protocol
     PUBLIC
         ${PROJECT_SOURCE_DIR}/include
 )
-target_link_libraries(telemetryhub_protocol PUBLIC telemetryhub_project_options)
+target_link_libraries(
+    telemetryhub_protocol
+    PUBLIC
+        telemetryhub_project_options
+    PRIVATE
+        nlohmann_json::nlohmann_json
+)
 
 add_executable(telemetry_server apps/telemetry_server/main.cpp)
 target_link_libraries(telemetry_server PRIVATE telemetryhub_project_options)

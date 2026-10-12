@@ -106,3 +106,16 @@ target_link_libraries(
         GTest::gtest_main
 )
 gtest_discover_tests(telemetryhub_message_framer_tests PROPERTIES TIMEOUT 10)
+
+add_executable(
+    telemetryhub_message_codec_tests
+    unit/message_codec_test.cpp
+)
+target_link_libraries(
+    telemetryhub_message_codec_tests
+    PRIVATE
+        telemetryhub_protocol
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(telemetryhub_message_codec_tests PROPERTIES TIMEOUT 10)
