@@ -122,13 +122,37 @@ EnqueueStatus ClientSession::enqueue(
         return EnqueueStatus::accepted;
     case concurrency::QueueOperationStatus::cancelled:
         return EnqueueStatus::cancelled;
-    case concurrency::QueueOperationStatus::closed:
     case concurrency::QueueOperationStatus::full:
+        return EnqueueStatus::full;
+    case concurrency::QueueOperationStatus::closed:
         return EnqueueStatus::closed;
     }
     return EnqueueStatus::closed;
 }
 
+EnqueueStatus ClientSession::try_enqueue(std::vector<std::byte> bytes)
+{
+    if (bytes.size() > max_outbound_buffer_size_bytes_)
+    {
+        return EnqueueStatus::too_large;
+    }
+    if (stop_source_.stop_requested())
+    {
+        return EnqueueStatus::closed;
+    }
+
+    switch (outbound_.try_push(std::move(bytes)))
+    {
+    case concurrency::QueueOperationStatus::success:
+        return EnqueueStatus::accepted;
+    case concurrency::QueueOperationStatus::full:
+        return EnqueueStatus::full;
+    case concurrency::QueueOperationStatus::closed:
+    case concurrency::QueueOperationStatus::cancelled:
+        return EnqueueStatus::closed;
+    }
+    return EnqueueStatus::closed;
+}
 bool ClientSession::queue_output(SessionOutput output, const std::stop_token stop_token)
 {
     for (auto& item : output.outbound)

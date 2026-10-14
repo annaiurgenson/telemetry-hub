@@ -220,6 +220,36 @@ public:
         return session->enqueue(std::move(bytes), stop_token);
     }
 
+    [[nodiscard]] EnqueueStatus try_enqueue(
+        const ConnectionId connection_id,
+        std::vector<std::byte> bytes)
+    {
+        if (!begin_enqueue())
+        {
+            return EnqueueStatus::closed;
+        }
+        EnqueueGuard operation{*this};
+
+        std::shared_ptr<ClientSession> session;
+        {
+            std::lock_guard registry_lock{registry_mutex_};
+            const auto found = sessions_.find(connection_id.value());
+            if (found == sessions_.end())
+            {
+                return EnqueueStatus::unknown_connection;
+            }
+            session = found->second;
+        }
+
+        const EnqueueStatus status = session->try_enqueue(std::move(bytes));
+        if (status == EnqueueStatus::full)
+        {
+            // The shared session owner is retained by this operation guard;
+            // request stop only after queue/registry locks have been released.
+            session->request_stop();
+        }
+        return status;
+    }
     [[nodiscard]] std::error_code shutdown_error() const noexcept
     {
         const int error = shutdown_error_code_.load();
@@ -461,6 +491,13 @@ std::size_t TcpServer::active_connection_count() const noexcept
 std::vector<ConnectionId> TcpServer::connection_ids() const
 {
     return impl_->connection_ids();
+}
+
+EnqueueStatus TcpServer::try_enqueue(
+    const ConnectionId connection_id,
+    std::vector<std::byte> bytes)
+{
+    return impl_->try_enqueue(connection_id, std::move(bytes));
 }
 
 EnqueueStatus TcpServer::enqueue(

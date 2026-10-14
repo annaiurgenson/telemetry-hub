@@ -62,8 +62,8 @@ TCP bytes
 
 - The processing path uses a bounded global incoming-command queue, a bounded completed-response queue when used, and one bounded outbound-message queue per connection.
 - Capacities are named configuration values; defaults will be proposed in the implementing milestone.
-- When the incoming queue is full, the server returns `SERVER_BUSY` when safe.
-- Later overload handling will treat a persistently full outbound queue as a slow client and close that connection. Milestone 4A exposes stop-aware bounded enqueueing; the disconnect policy is deferred to 4C.
+- The global incoming-command queue is bounded (default 1,024); a nonblocking submission that finds it full returns `SERVER_BUSY` when the per-connection outbound queue can admit the response.
+- Each connection outbound queue is bounded. A nonblocking enqueue that finds it full closes only that slow connection; immediate protocol errors and consumer responses use the same queue and byte limits.
 
 ## Ownership, concurrency, and shutdown
 
@@ -225,7 +225,7 @@ Milestone 2B uses focused free functions rather than a server or session abstrac
 - Until protocol integration, the reader uses a fixed 4 KiB receive buffer and discards received application bytes. `TcpServer::enqueue()` is the production interface for sending already encoded owned bytes; it waits for bounded queue capacity and accepts a stop token. Stopping a session cancels unsent queued buffers.
 - Exit: localhost integration tests cover start/stop, concurrent clients, unique IDs, connection-limit rejection, peer-close reaping, writer delivery, idle cancellation, enqueue admission after shutdown begins, enqueue blocked by a full outbound queue, enqueue/disconnect/reaping/shutdown races, active reader/writer shutdown, peer closure before local shutdown, concurrent shutdown calls, and restart cycles.
 
-Milestone 4B adds per-connection protocol framing/codec integration and device registration. Milestone 4C will add the global incoming-command queue and full backpressure/overload policy.
+Milestone 4B integrates per-connection framing, typed protocol handling, and device registration. Milestone 4C adds the bounded incoming-command queue and immediate overload handling; domain processing and completed-response dispatch remain in Milestone 5.
 
 #### Milestone 4B - Protocol integration and device registration (complete)
 
@@ -237,6 +237,17 @@ Milestone 4B adds per-connection protocol framing/codec integration and device r
 - A correlated protocol-validation error makes at most one nonblocking queue-admission attempt. If accepted, the queue drains with a finite configurable deadline; otherwise the session closes immediately. Shutdown cancels a pending flush. This is best-effort socket delivery, not an application-level delivery guarantee. Malformed JSON, framing failures, or validation errors without a trustworthy ID close only the affected connection.
 - No global incoming-command queue, full overload/backpressure policy, worker processing, telemetry storage, or response dispatcher is introduced in 4B; those remain in Milestones 4C and 5.
 - Exit: unit tests verify nonblocking queue admission; localhost tests cover fragmented and combined frames, maximum request IDs, protocol commands, registration conflicts/reconnect, correlated terminal errors, malformed-client isolation, and active-session shutdown.
+
+#### Milestone 4C - Incoming queue, backpressure, and overload handling (complete)
+
+- `CommandEnvelope` owns the originating `ConnectionId`, request ID, device ID snapshot, and typed telemetry/statistics command. The snapshot is taken from the registration registry before queue admission; it contains no socket or session reference.
+- `CommandIngress` owns one bounded queue (default 1,024) and one `std::jthread` consumer. `try_push` is nonblocking. The consumer currently returns correlated `PROCESSING_UNAVAILABLE` responses through `TcpServer::try_enqueue`, retaining the originating `ConnectionId`; it performs no domain work.
+- `DeviceRegistrationRegistry::device_for_connection` returns a synchronized owned snapshot. Disconnect cleanup remains compare-and-erase by `ConnectionId`.
+- A full incoming queue returns a correlated `SERVER_BUSY` with one nonblocking outbound admission attempt. A full per-connection outbound queue requests closure of that connection after releasing queue/registry locks. PING and registration remain immediate. Commands are admitted in frame order within a batch, and immediate responses are queued by the reader in that same order. Consumer responses are asynchronous and may interleave with or overtake those immediate responses; clients correlate by request ID. A closed ingress closes only the submitting session.
+- Shutdown closes ingress admission, closes the queue, drains accepted envelopes through the consumer, and joins it while `TcpServer` remains alive. The application then shuts down the server and joins all session I/O. Exceptional exits after ingress startup use the same ingress-before-server order. Session callbacks retain shared ownership of ingress and registrations until the server joins them. The ingress lifecycle mutex is released before queue operations and joins; the sink runs on the consumer, must return promptly, and must not call ingress shutdown or destroy it. Concurrent submit/shutdown is supported, while destruction must not overlap an external public call.
+- This milestone does not add the global completed-response queue, workers, `SERVER_BUSY` policy beyond immediate queue saturation, telemetry processing, storage, or response dispatch. Those remain in Milestone 5.
+- Exit: unit tests cover bounded admission, full/closed results, correlated unavailable responses, drain-on-close, and concurrent submit/shutdown. Integration tests cover queue saturation in a mixed batch, `SERVER_BUSY` correlation, stale response isolation across disconnect/reconnect, registration snapshots, malformed-client isolation, and slow-client isolation when outbound capacity is exhausted.
+
 ### Milestone 5 - Telemetry processing
 
 - Add telemetry submission, approved statistics, worker processing, thread-safe storage, the response path, and dispatcher.

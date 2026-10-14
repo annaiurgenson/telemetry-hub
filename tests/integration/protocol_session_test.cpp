@@ -3,6 +3,7 @@
 #include <telemetryhub/network/winsock_error.hpp>
 #include <telemetryhub/protocol/message_codec.hpp>
 #include <telemetryhub/protocol/message_framer.hpp>
+#include <telemetryhub/server/command_ingress.hpp>
 #include <telemetryhub/server/device_registration_registry.hpp>
 #include <telemetryhub/server/protocol_session_handler.hpp>
 
@@ -11,6 +12,7 @@
 #include <array>
 #include <atomic>
 #include <future>
+#include <functional>
 #include <latch>
 #include <barrier>
 #include <limits>
@@ -127,29 +129,46 @@ struct TestServer
 {
     std::shared_ptr<telemetryhub::server::DeviceRegistrationRegistry> registrations =
         std::make_shared<telemetryhub::server::DeviceRegistrationRegistry>();
-    std::shared_ptr<telemetryhub::server::ProtocolSessionHandler> handler =
-        std::make_shared<telemetryhub::server::ProtocolSessionHandler>(registrations);
-    TcpServer server{make_config()};
+    std::shared_ptr<telemetryhub::server::CommandIngress> ingress;
+    std::shared_ptr<telemetryhub::server::ProtocolSessionHandler> handler;
+    TcpServer server;
 
-    static TcpServerConfig make_config()
+    static TcpServerConfig make_config(
+        const std::shared_ptr<telemetryhub::server::ProtocolSessionHandler>& shared_handler,
+        const std::size_t outbound_capacity)
     {
         TcpServerConfig config;
-        return config;
-    }
-
-    TestServer() : server{[this] {
-        TcpServerConfig config;
-        const auto shared_handler = handler;
+        config.outbound_queue_capacity = outbound_capacity;
         config.session_callbacks_factory = [shared_handler](const ConnectionId id) {
             return shared_handler->callbacks_for(id);
         };
         return config;
-    }()}
+    }
+
+    explicit TestServer(
+        const std::size_t incoming_capacity = telemetryhub::server::default_incoming_command_queue_capacity,
+        std::function<void()> before_response = {},
+        const std::size_t outbound_capacity = telemetryhub::network::default_outbound_queue_capacity)
+        : ingress{std::make_shared<telemetryhub::server::CommandIngress>(incoming_capacity)},
+          handler{std::make_shared<telemetryhub::server::ProtocolSessionHandler>(registrations, ingress)},
+          server{make_config(handler, outbound_capacity)}
     {
+        ingress->start([this, gate = std::move(before_response)](
+                             const ConnectionId id, std::vector<std::byte> bytes) {
+            if (gate)
+            {
+                gate();
+            }
+            return server.try_enqueue(id, std::move(bytes));
+        });
         server.start();
     }
 
-    ~TestServer() { server.shutdown(); }
+    ~TestServer()
+    {
+        ingress->shutdown();
+        server.shutdown();
+    }
 
     [[nodiscard]] Socket client() const
     {
@@ -162,7 +181,6 @@ struct TestServer
         return socket;
     }
 };
-
 TEST(ProtocolSession, PingSupportsFragmentationCombinedFramesAndUint64Ids)
 {
     TestServer fixture;
@@ -306,7 +324,8 @@ TEST(ProtocolSession, CorrelatedValidationErrorFlushesThenClosesOnlyThatClient)
 TEST(ProtocolSession, TerminalBatchUsesOnlyNonblockingOutboundAdmissions)
 {
     auto registrations = std::make_shared<telemetryhub::server::DeviceRegistrationRegistry>();
-    telemetryhub::server::ProtocolSessionHandler handler{registrations};
+    auto ingress = std::make_shared<telemetryhub::server::CommandIngress>();
+    telemetryhub::server::ProtocolSessionHandler handler{registrations, ingress};
     const ConnectionId connection_id{44U};
     auto callbacks = handler.callbacks_for(connection_id);
 
@@ -329,6 +348,83 @@ TEST(ProtocolSession, TerminalBatchUsesOnlyNonblockingOutboundAdmissions)
         EXPECT_EQ(item.admission, telemetryhub::network::OutboundAdmission::try_once);
     }
 }
+TEST(ProtocolSession, SaturationReturnsCorrelatedServerBusyInMixedBatch)
+{
+    std::latch consumer_entered{1};
+    std::latch release_consumer{1};
+    std::atomic<bool> hold_first_response{true};
+    TestServer fixture{1U, [&] {
+        if (hold_first_response.exchange(false))
+        {
+            consumer_entered.count_down();
+            release_consumer.wait();
+        }
+    }};
+    Socket client = fixture.client();
+
+    expect_send(client, make_frame(Request{1U, Command{telemetryhub::protocol::RegisterDevice{"queue-device"}}}));
+    EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::DeviceRegistered>(read_response(client).body));
+
+    expect_send(client, make_frame(Request{2U, Command{telemetryhub::protocol::SubmitTelemetry{"m", 1.0}}}));
+    consumer_entered.wait();
+    expect_send(client, make_frame(Request{3U, Command{telemetryhub::protocol::SubmitTelemetry{"m", 2.0}}}));
+
+    auto mixed = make_frame(Request{4U, Command{telemetryhub::protocol::Ping{}}});
+    auto overloaded = make_frame(Request{5U, Command{telemetryhub::protocol::GetStatistics{"m"}}});
+    mixed.insert(mixed.end(), overloaded.begin(), overloaded.end());
+    expect_send(client, mixed);
+
+    const auto pong = read_response(client);
+    EXPECT_EQ(pong.request_id, 4U);
+    EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::Pong>(pong.body));
+    const auto busy = read_response(client);
+    EXPECT_EQ(busy.request_id, 5U);
+    ASSERT_TRUE(std::holds_alternative<ErrorResponse>(busy.body));
+    EXPECT_EQ(std::get<ErrorResponse>(busy.body).code, "SERVER_BUSY");
+
+    release_consumer.count_down();
+    for (const std::uint64_t request_id : {2U, 3U})
+    {
+        const auto response = read_response(client);
+        EXPECT_EQ(response.request_id, request_id);
+        ASSERT_TRUE(std::holds_alternative<ErrorResponse>(response.body));
+        EXPECT_EQ(std::get<ErrorResponse>(response.body).code, "PROCESSING_UNAVAILABLE");
+    }
+}
+TEST(ProtocolSession, DelayedResponseForDisconnectedConnectionCannotReachReconnect)
+{
+    std::latch response_entered{1};
+    std::latch release_response{1};
+    TestServer fixture{4U, [&] {
+        response_entered.count_down();
+        release_response.wait();
+    }};
+
+    Socket old_client = fixture.client();
+    expect_send(old_client, make_frame(Request{1U, Command{telemetryhub::protocol::RegisterDevice{"reused-device"}}}));
+    ASSERT_TRUE(std::holds_alternative<telemetryhub::protocol::DeviceRegistered>(read_response(old_client).body));
+    const auto old_id = fixture.server.connection_ids().front();
+
+    expect_send(old_client, make_frame(Request{2U, Command{telemetryhub::protocol::SubmitTelemetry{"m", 4.0}}}));
+    response_entered.wait();
+    ASSERT_FALSE(old_client.close());
+    ASSERT_TRUE(wait_for_registration_count(fixture.registrations, 0U));
+
+    Socket new_client = fixture.client();
+    expect_send(new_client, make_frame(Request{3U, Command{telemetryhub::protocol::RegisterDevice{"reused-device"}}}));
+    const auto registered = read_response(new_client);
+    ASSERT_EQ(registered.request_id, 3U);
+    ASSERT_TRUE(std::holds_alternative<telemetryhub::protocol::DeviceRegistered>(registered.body));
+    const auto ids = fixture.server.connection_ids();
+    ASSERT_EQ(ids.size(), 1U);
+    EXPECT_NE(ids.front(), old_id);
+
+    release_response.count_down();
+    expect_send(new_client, make_frame(Request{4U, Command{telemetryhub::protocol::Ping{}}}));
+    const auto pong = read_response(new_client);
+    EXPECT_EQ(pong.request_id, 4U);
+    EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::Pong>(pong.body));
+}
 TEST(ProtocolSession, FatalZeroLengthFrameClosesOnlyThatConnection)
 {
     TestServer fixture;
@@ -343,6 +439,15 @@ TEST(ProtocolSession, FatalZeroLengthFrameClosesOnlyThatConnection)
     EXPECT_EQ(read_response(healthy).request_id, 102U);
 }
 
+TEST(DeviceRegistrationRegistry, DeviceLookupReturnsConnectionOwnedSnapshot)
+{
+    telemetryhub::server::DeviceRegistrationRegistry registry;
+    const ConnectionId owner{20U};
+    EXPECT_EQ(registry.register_device(owner, "snapshot-device"),
+              telemetryhub::server::RegistrationResult::registered);
+    EXPECT_EQ(registry.device_for_connection(owner), std::optional<std::string>{"snapshot-device"});
+    EXPECT_FALSE(registry.device_for_connection(ConnectionId{21U}).has_value());
+}
 TEST(DeviceRegistrationRegistry, StaleDisconnectCannotEraseNewOwner)
 {
     telemetryhub::server::DeviceRegistrationRegistry registry;
@@ -425,6 +530,80 @@ TEST(ProtocolSession, FullOutboundQueueRejectsTerminalErrorWithoutBlocking)
         std::this_thread::yield();
     }
     EXPECT_EQ(server.active_connection_count(), 0U);
+    server.shutdown();
+}
+TEST(ProtocolSession, FullOutboundQueueClosesOnlyTheSlowClient)
+{
+    constexpr std::size_t large_message_size = 8U * 1024U * 1024U;
+    TcpServerConfig config{0U, 2U, 1U, large_message_size};
+    config.session_callbacks_factory = [large_message_size](const ConnectionId id) {
+        return telemetryhub::network::SessionCallbacks{
+            [large_message_size, id](const ConnectionId, const std::span<const std::byte>) {
+                telemetryhub::network::SessionOutput output;
+                if (id.value() == 1U)
+                {
+                    output.outbound.push_back(telemetryhub::network::SessionOutbound{
+                        std::vector<std::byte>(large_message_size, std::byte{'x'}),
+                        telemetryhub::network::OutboundAdmission::wait_for_capacity});
+                    output.outbound.push_back(telemetryhub::network::SessionOutbound{
+                        {std::byte{'y'}}, telemetryhub::network::OutboundAdmission::wait_for_capacity});
+                    output.outbound.push_back(telemetryhub::network::SessionOutbound{
+                        {std::byte{'z'}}, telemetryhub::network::OutboundAdmission::try_once});
+                    output.close_mode = telemetryhub::network::SessionCloseMode::close_after_flush;
+                    return output;
+                }
+                output.outbound.push_back(telemetryhub::network::SessionOutbound{
+                    {std::byte{'o'}, std::byte{'k'}},
+                    telemetryhub::network::OutboundAdmission::wait_for_capacity});
+                return output;
+            },
+            [](const ConnectionId) {}};
+    };
+    TcpServer server{std::move(config)};
+    server.start();
+
+    Socket slow_client = create_ipv4_tcp_socket();
+    const int receive_buffer_size = 1024;
+    ASSERT_NE(setsockopt(
+                  slow_client.native_handle(), SOL_SOCKET, SO_RCVBUF,
+                  reinterpret_cast<const char*>(&receive_buffer_size),
+                  static_cast<int>(sizeof(receive_buffer_size))),
+              SOCKET_ERROR);
+    connect_loopback(slow_client, server.bound_port());
+    ASSERT_FALSE(slow_client.set_nonblocking(true));
+    const auto first_deadline = std::chrono::steady_clock::now() + 3s;
+    while (server.active_connection_count() != 1U && std::chrono::steady_clock::now() < first_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_EQ(server.active_connection_count(), 1U);
+
+    Socket healthy_client = create_ipv4_tcp_socket();
+    connect_loopback(healthy_client, server.bound_port());
+    ASSERT_FALSE(healthy_client.set_nonblocking(true));
+    const auto both_deadline = std::chrono::steady_clock::now() + 3s;
+    while (server.active_connection_count() != 2U && std::chrono::steady_clock::now() < both_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_EQ(server.active_connection_count(), 2U);
+
+    const std::array<std::byte, 1U> trigger{std::byte{'t'}};
+    expect_send(slow_client, trigger);
+    const auto slow_close_deadline = std::chrono::steady_clock::now() + 5s;
+    while (server.active_connection_count() != 1U && std::chrono::steady_clock::now() < slow_close_deadline)
+    {
+        std::this_thread::yield();
+    }
+    ASSERT_EQ(server.active_connection_count(), 1U);
+
+    expect_send(healthy_client, trigger);
+    std::array<std::byte, 2U> response{};
+    const auto healthy_response = receive_some(healthy_client, response, {});
+    ASSERT_EQ(healthy_response.status, ReceiveStatus::data);
+    ASSERT_EQ(healthy_response.bytes_transferred, response.size());
+    EXPECT_EQ(response[0], std::byte{'o'});
+    EXPECT_EQ(response[1], std::byte{'k'});
     server.shutdown();
 }
 TEST(ProtocolSession, ShutdownWaitsForActiveCallbackAndStopsBackpressuredWriter)

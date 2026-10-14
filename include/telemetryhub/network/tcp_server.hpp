@@ -33,6 +33,7 @@ enum class EnqueueStatus
     accepted,
     unknown_connection,
     too_large,
+    full,
     closed,
     cancelled
 };
@@ -106,6 +107,8 @@ public:
     [[nodiscard]] std::size_t active_connection_count() const noexcept;
     [[nodiscard]] std::vector<ConnectionId> connection_ids() const;
     // Blocks while the per-connection queue is full; use stop_token to cancel the wait.
+    // Nonblocking admission; a full per-connection queue requests closure of that connection.
+    [[nodiscard]] EnqueueStatus try_enqueue(ConnectionId connection_id, std::vector<std::byte> bytes);
     [[nodiscard]] EnqueueStatus enqueue(
         ConnectionId connection_id,
         std::vector<std::byte> bytes,

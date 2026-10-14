@@ -78,6 +78,7 @@ add_library(
     telemetryhub_server
     src/server/device_registration_registry.cpp
     src/server/protocol_session_handler.cpp
+    src/server/command_ingress.cpp
 )
 target_include_directories(
     telemetryhub_server

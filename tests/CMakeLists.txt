@@ -9,7 +9,20 @@ FetchContent_Declare(
     GIT_SHALLOW TRUE
 )
 FetchContent_MakeAvailable(googletest)
+include(GoogleTest)
 
+add_executable(
+    telemetryhub_command_ingress_tests
+    unit/command_ingress_test.cpp
+)
+target_link_libraries(
+    telemetryhub_command_ingress_tests
+    PRIVATE
+        telemetryhub_server
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(telemetryhub_command_ingress_tests PROPERTIES TIMEOUT 10)
 add_executable(
     telemetryhub_protocol_session_integration_tests
     integration/protocol_session_test.cpp
@@ -21,7 +34,6 @@ target_link_libraries(
         telemetryhub_project_options
         GTest::gtest_main
 )
-include(GoogleTest)
 
 gtest_discover_tests(
     telemetryhub_protocol_session_integration_tests
@@ -35,7 +47,6 @@ target_link_libraries(
         telemetryhub_project_options
         GTest::gtest_main
 )
-
 
 gtest_discover_tests(telemetryhub_smoke_tests)
 

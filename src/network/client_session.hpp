@@ -39,6 +39,7 @@ public:
     [[nodiscard]] bool completed() const noexcept;
     [[nodiscard]] std::error_code shutdown_error() const noexcept;
     [[nodiscard]] ConnectionId id() const noexcept;
+    [[nodiscard]] EnqueueStatus try_enqueue(std::vector<std::byte> bytes);
     [[nodiscard]] EnqueueStatus enqueue(
         std::vector<std::byte> bytes,
         std::stop_token stop_token);

@@ -66,6 +66,19 @@ bool DeviceRegistrationRegistry::is_registered(const network::ConnectionId conne
     return false;
 }
 
+std::optional<std::string> DeviceRegistrationRegistry::device_for_connection(
+    const network::ConnectionId connection_id) const
+{
+    std::lock_guard lock{mutex_};
+    for (const auto& [device_id, owner] : owners_)
+    {
+        if (owner == connection_id)
+        {
+            return device_id;
+        }
+    }
+    return std::nullopt;
+}
 std::size_t DeviceRegistrationRegistry::size() const noexcept
 {
     std::lock_guard lock{mutex_};
