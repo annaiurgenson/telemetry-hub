@@ -122,6 +122,8 @@ telemetryhub_project_options (INTERFACE: C++20 and project warnings)
 |   |-- telemetryhub_socket_tests (+ GTest::gtest_main)
 |   |-- telemetryhub_tcp_integration_tests (+ GTest::gtest_main)
 |   `-- telemetryhub_tcp_server_integration_tests (+ GTest::gtest_main)
+|-- telemetryhub_domain
+|   `-- telemetryhub_telemetry_store_tests (+ GTest::gtest_main)
 |-- telemetryhub_protocol
 |   |-- telemetryhub_message_framer_tests (+ GTest::gtest_main)
 |   `-- telemetryhub_message_codec_tests (+ GTest::gtest_main)
@@ -250,8 +252,22 @@ Milestone 4B integrates per-connection framing, typed protocol handling, and dev
 
 ### Milestone 5 - Telemetry processing
 
-- Add telemetry submission, approved statistics, worker processing, thread-safe storage, the response path, and dispatcher.
-- Exit: unit and integration tests verify concurrent statistics and prevent cross-connection response delivery.
+#### Milestone 5A - Thread-safe TelemetryStore (complete)
+
+- `telemetryhub_domain` provides a standalone `TelemetryStore` with a `std::map` keyed by `(device_id, metric)` and one mutex. It has no TCP, Winsock, protocol, registration, ingress, or worker-pool dependency.
+- Each entry stores count, minimum, maximum, online arithmetic mean, last value, last server receive time, and the receive sequence associated with the last fields. Raw samples are not retained. The latest sequence selects `last_value` and `last_received_at`; every valid sample contributes to aggregate values, and equal sequences retain the existing last fields.
+- The mean uses an online update with a sign-aware calculation to avoid overflowing the difference between opposite finite extremes. A non-finite result is rejected without changing the entry. On MSVC, `long double` is not assumed to offer greater precision than `double`; mean weighting becomes approximate when counts exceed `2^53`, while the `uint64_t` sample count remains exact.
+- The store rejects empty or over-128-byte key components and non-finite samples. UTF-8 validation remains at the codec boundary. Capacity defaults to 65,536 unique keys, must be positive, and can be configured at construction. At capacity, new keys return `capacity_reached`; existing keys remain updateable. No eviction is performed.
+- Updates and queries use owned values under one mutex. Existing-entry updates calculate the full candidate before commit. Key allocation or map insertion exceptions leave existing state unchanged; no mutable references or locks escape the component.
+- Exit: focused unit tests cover aggregate math, key and value validation, receive ordering, capacity behavior, concurrent updates, and consistent snapshots under concurrent queries.
+
+#### Remaining Milestone 5 work (not started)
+
+- **5B — TelemetryProcessor:** validate and execute telemetry/statistics commands against the store.
+- **5C — Response pipeline:** replace the temporary consumer and route real processing responses, initially with one processing thread.
+- **5D — WorkerPool integration:** concurrent command execution, bounded dispatch, shutdown correctness, and end-to-end concurrency tests.
+
+Each remaining milestone requires explicit approval before work begins.
 
 ### Milestone 6 - Production-quality improvements
 
@@ -264,6 +280,6 @@ These remain intentionally deferred until their implementing milestone:
 
 - Default capacities and exact full-queue wait thresholds.
 - Worker-count default and shutdown drain-versus-cancel policy for each queue.
-- Numeric acceptance rules and arithmetic-mean precision/overflow strategy for domain statistics.
+- Receive-sequence generation and propagation through ingress, deferred to the response-processing milestone.
 - Socket timeouts and the exact slow-client disconnect threshold.
 - Logger output destination and formatting.

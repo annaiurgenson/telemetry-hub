@@ -12,6 +12,19 @@ FetchContent_MakeAvailable(googletest)
 include(GoogleTest)
 
 add_executable(
+    telemetryhub_telemetry_store_tests
+    unit/telemetry_store_test.cpp
+)
+target_link_libraries(
+    telemetryhub_telemetry_store_tests
+    PRIVATE
+        telemetryhub_domain
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(telemetryhub_telemetry_store_tests PROPERTIES TIMEOUT 15)
+
+add_executable(
     telemetryhub_command_ingress_tests
     unit/command_ingress_test.cpp
 )

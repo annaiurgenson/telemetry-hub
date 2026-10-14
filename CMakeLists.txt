@@ -57,6 +57,17 @@ FetchContent_Declare(
 FetchContent_MakeAvailable(nlohmann_json)
 
 add_library(
+    telemetryhub_domain
+    src/domain/telemetry_store.cpp
+)
+target_include_directories(
+    telemetryhub_domain
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/include
+)
+target_link_libraries(telemetryhub_domain PUBLIC telemetryhub_project_options)
+
+add_library(
     telemetryhub_protocol
     src/protocol/message_framer.cpp
     src/protocol/message_codec.cpp
