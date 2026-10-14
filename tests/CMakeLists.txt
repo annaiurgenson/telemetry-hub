@@ -178,3 +178,20 @@ gtest_discover_tests(
     PROPERTIES
         TIMEOUT 10
 )
+
+add_executable(
+    telemetryhub_telemetry_processor_tests
+    unit/telemetry_processor_test.cpp
+)
+target_link_libraries(
+    telemetryhub_telemetry_processor_tests
+    PRIVATE
+        telemetryhub_domain
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(
+    telemetryhub_telemetry_processor_tests
+    PROPERTIES
+        TIMEOUT 15
+)

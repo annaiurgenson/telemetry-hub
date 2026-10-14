@@ -59,6 +59,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 add_library(
     telemetryhub_domain
     src/domain/telemetry_store.cpp
+    src/domain/telemetry_processor.cpp
 )
 target_include_directories(
     telemetryhub_domain

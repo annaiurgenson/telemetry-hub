@@ -261,9 +261,16 @@ Milestone 4B integrates per-connection framing, typed protocol handling, and dev
 - Updates and queries use owned values under one mutex. Existing-entry updates calculate the full candidate before commit. Key allocation or map insertion exceptions leave existing state unchanged; no mutable references or locks escape the component.
 - Exit: focused unit tests cover aggregate math, key and value validation, receive ordering, capacity behavior, concurrent updates, and consistent snapshots under concurrent queries.
 
+#### Milestone 5B - TelemetryProcessor (complete)
+
+- `telemetryhub_domain` includes a synchronous `TelemetryProcessor` that validates trusted device IDs and metric names (nonempty, at most 128 bytes), rejects non-finite samples, submits samples to `TelemetryStore`, and returns owned statistics snapshots. It has no protocol, networking, ingress, or worker-pool dependency.
+- Submission outcomes distinguish accepted, invalid input, capacity reached, count overflow, and numeric failure. Statistics queries distinguish invalid input from a valid key with no statistics (`statistics_not_found`). Count overflow and numeric failure remain explicitly mapped even though the current public store API does not offer a practical way to trigger them in focused tests.
+- The caller supplies server receive time and receive sequence. The store counts every successful sample and uses the greatest receive sequence to select last value/time; equal sequences preserve the existing last fields.
+- The processor borrows the store, which must outlive it and every invocation/task using it. Processor calls can run concurrently without another processor mutex because store operations are synchronized. A successful submission is returned only after the synchronized update completes. Queries return the store snapshot at their execution point; concurrent requests are not forced into receive order. A query made after observing a successful submission result sees that committed sample when it queries the same store and device/metric key.
+- This milestone does not alter command envelopes or ingress. Protocol error conversion (including a future `STATISTICS_NOT_FOUND` wire code), response dispatch, receive metadata propagation, and processing integration remain for 5C; WorkerPool execution remains for 5D.
+
 #### Remaining Milestone 5 work (not started)
 
-- **5B — TelemetryProcessor:** validate and execute telemetry/statistics commands against the store.
 - **5C — Response pipeline:** replace the temporary consumer and route real processing responses, initially with one processing thread.
 - **5D — WorkerPool integration:** concurrent command execution, bounded dispatch, shutdown correctness, and end-to-end concurrency tests.
 
