@@ -3,36 +3,38 @@
 #include <telemetryhub/network/tcp.hpp>
 #include <telemetryhub/protocol/message_codec.hpp>
 #include <telemetryhub/protocol/message_framer.hpp>
+#include <telemetryhub/server/processing_response.hpp>
 
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
 namespace telemetryhub::server {
 namespace {
 
-[[nodiscard]] std::vector<std::byte> unavailable_frame(const CommandEnvelope& envelope)
+[[nodiscard]] std::optional<std::vector<std::byte>> encode_response(
+    const protocol::Response& response)
 {
-    const protocol::Response response{
-        envelope.request_id,
-        protocol::ResponseBody{protocol::ErrorResponse{
-            "PROCESSING_UNAVAILABLE", "Command processing is not available yet"}}};
     auto payload = protocol::serialize_response_payload(response);
     if (payload.error.has_value())
     {
-        return {};
+        return std::nullopt;
     }
     auto frame = protocol::encode_frame(payload.payload);
     if (frame.error.has_value())
     {
-        return {};
+        return std::nullopt;
     }
     return std::move(frame.frame);
 }
 
 } // namespace
 
-CommandIngress::CommandIngress(const std::size_t capacity)
-    : commands_{capacity}
+CommandIngress::CommandIngress(
+    domain::TelemetryProcessor& processor,
+    const std::size_t capacity)
+    : processor_{processor},
+      commands_{capacity}
 {
 }
 
@@ -71,6 +73,15 @@ CommandAdmission CommandIngress::submit(CommandEnvelope envelope)
         }
     }
 
+    const auto sequence = allocate_receive_sequence();
+    if (!sequence.has_value())
+    {
+        return CommandAdmission::sequence_exhausted;
+    }
+    envelope.receive_sequence = *sequence;
+
+    // try_push is the queue-close linearization point. The allocated sequence
+    // may be unused when this attempt loses to saturation or shutdown.
     switch (commands_.try_push(std::move(envelope)))
     {
     case concurrency::QueueOperationStatus::success:
@@ -82,6 +93,22 @@ CommandAdmission CommandIngress::submit(CommandEnvelope envelope)
         return CommandAdmission::closed;
     }
     return CommandAdmission::closed;
+}
+
+std::optional<domain::ReceiveSequence> CommandIngress::allocate_receive_sequence() noexcept
+{
+    using Sequence = domain::ReceiveSequence;
+    Sequence previous = last_receive_sequence_.load(std::memory_order_relaxed);
+    while (previous != (std::numeric_limits<Sequence>::max)())
+    {
+        const Sequence next = previous + 1U;
+        if (last_receive_sequence_.compare_exchange_weak(
+                previous, next, std::memory_order_relaxed, std::memory_order_relaxed))
+        {
+            return next;
+        }
+    }
+    return std::nullopt;
 }
 
 void CommandIngress::shutdown() noexcept
@@ -127,7 +154,7 @@ void CommandIngress::consume(const ResponseSink& response_sink) noexcept
             {
                 break;
             }
-            respond_unavailable(*item.value, response_sink);
+            process_and_respond(*item.value, response_sink);
         }
     }
     catch (...)
@@ -136,23 +163,56 @@ void CommandIngress::consume(const ResponseSink& response_sink) noexcept
     }
 }
 
-void CommandIngress::respond_unavailable(
+void CommandIngress::process_and_respond(
     const CommandEnvelope& envelope,
     const ResponseSink& response_sink) noexcept
 {
+    bool sink_invoked = false;
     try
     {
-        std::vector<std::byte> frame = unavailable_frame(envelope);
-        if (!frame.empty())
+        const protocol::Response response = make_processing_response(envelope, processor_);
+        auto frame = encode_response(response);
+        if (!frame.has_value())
         {
-            // try_enqueue is nonblocking. Full/closed/unknown outcomes are
-            // local to this connection and cannot stall the consumer.
-            static_cast<void>(response_sink(envelope.connection_id, std::move(frame)));
+            attempt_fallback_response(envelope, response_sink, sink_invoked);
+            return;
         }
+
+        // Once invocation begins, the sink may have accepted the frame even if
+        // it returns an error or throws. Never retry this request after this point.
+        sink_invoked = true;
+        static_cast<void>(response_sink(envelope.connection_id, std::move(*frame)));
     }
     catch (...)
     {
-        // A failed response affects only this envelope; keep draining others.
+        if (!sink_invoked)
+        {
+            attempt_fallback_response(envelope, response_sink, sink_invoked);
+        }
+    }
+}
+
+void CommandIngress::attempt_fallback_response(
+    const CommandEnvelope& envelope,
+    const ResponseSink& response_sink,
+    bool& sink_invoked) noexcept
+{
+    try
+    {
+        const protocol::Response response =
+            make_processing_unavailable_response(envelope.request_id);
+        auto frame = encode_response(response);
+        if (!frame.has_value())
+        {
+            return;
+        }
+
+        sink_invoked = true;
+        static_cast<void>(response_sink(envelope.connection_id, std::move(*frame)));
+    }
+    catch (...)
+    {
+        // A failed fallback cannot stop draining later accepted commands.
     }
 }
 

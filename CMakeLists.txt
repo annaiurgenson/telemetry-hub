@@ -91,6 +91,7 @@ add_library(
     src/server/device_registration_registry.cpp
     src/server/protocol_session_handler.cpp
     src/server/command_ingress.cpp
+    src/server/processing_response.cpp
 )
 target_include_directories(
     telemetryhub_server
@@ -102,6 +103,7 @@ target_link_libraries(
     PUBLIC
         telemetryhub_network
         telemetryhub_protocol
+        telemetryhub_domain
         telemetryhub_project_options
 )
 

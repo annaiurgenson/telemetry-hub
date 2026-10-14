@@ -34,6 +34,8 @@ namespace {
 
 using namespace std::chrono_literals;
 using telemetryhub::network::ConnectionId;
+using telemetryhub::domain::TelemetryProcessor;
+using telemetryhub::domain::TelemetryStore;
 using telemetryhub::network::ReceiveStatus;
 using telemetryhub::network::Socket;
 using telemetryhub::network::TcpServer;
@@ -127,6 +129,8 @@ bool wait_for_registration_count(
 
 struct TestServer
 {
+    TelemetryStore store;
+    TelemetryProcessor processor{store};
     std::shared_ptr<telemetryhub::server::DeviceRegistrationRegistry> registrations =
         std::make_shared<telemetryhub::server::DeviceRegistrationRegistry>();
     std::shared_ptr<telemetryhub::server::CommandIngress> ingress;
@@ -149,7 +153,7 @@ struct TestServer
         const std::size_t incoming_capacity = telemetryhub::server::default_incoming_command_queue_capacity,
         std::function<void()> before_response = {},
         const std::size_t outbound_capacity = telemetryhub::network::default_outbound_queue_capacity)
-        : ingress{std::make_shared<telemetryhub::server::CommandIngress>(incoming_capacity)},
+        : ingress{std::make_shared<telemetryhub::server::CommandIngress>(processor, incoming_capacity)},
           handler{std::make_shared<telemetryhub::server::ProtocolSessionHandler>(registrations, ingress)},
           server{make_config(handler, outbound_capacity)}
     {
@@ -222,15 +226,63 @@ TEST(ProtocolSession, RegistrationCommandsAndProcessingUnavailableResponses)
 
     expect_send(client, make_frame(Request{4U, Command{telemetryhub::protocol::SubmitTelemetry{"temperature", 21.5}}}));
     auto telemetry = read_response(client);
-    ASSERT_TRUE(std::holds_alternative<ErrorResponse>(telemetry.body));
-    EXPECT_EQ(std::get<ErrorResponse>(telemetry.body).code, "PROCESSING_UNAVAILABLE");
+    ASSERT_EQ(telemetry.request_id, 4U);
+    EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(telemetry.body));
 
     expect_send(client, make_frame(Request{5U, Command{telemetryhub::protocol::GetStatistics{"temperature"}}}));
     auto statistics = read_response(client);
-    ASSERT_TRUE(std::holds_alternative<ErrorResponse>(statistics.body));
-    EXPECT_EQ(std::get<ErrorResponse>(statistics.body).code, "PROCESSING_UNAVAILABLE");
+    ASSERT_EQ(statistics.request_id, 5U);
+    ASSERT_TRUE(std::holds_alternative<telemetryhub::protocol::Statistics>(statistics.body));
+    const auto& stats = std::get<telemetryhub::protocol::Statistics>(statistics.body);
+    EXPECT_EQ(stats.metric, "temperature");
+    EXPECT_EQ(stats.sample_count, 1U);
+    EXPECT_DOUBLE_EQ(stats.minimum, 21.5);
+    EXPECT_DOUBLE_EQ(stats.maximum, 21.5);
+    EXPECT_DOUBLE_EQ(stats.mean, 21.5);
+    EXPECT_DOUBLE_EQ(stats.last_value, 21.5);
+    EXPECT_EQ(stats.last_received_at.size(), 24U);
 }
 
+TEST(ProtocolSession, UnknownStatisticsMetricReturnsStatisticsNotFound)
+{
+    TestServer fixture;
+    Socket client = fixture.client();
+    expect_send(client, make_frame(Request{1U, Command{telemetryhub::protocol::RegisterDevice{"missing-device"}}}));
+    EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::DeviceRegistered>(read_response(client).body));
+    expect_send(client, make_frame(Request{2U, Command{telemetryhub::protocol::GetStatistics{"unknown"}}}));
+
+    const auto response = read_response(client);
+    ASSERT_EQ(response.request_id, 2U);
+    ASSERT_TRUE(std::holds_alternative<ErrorResponse>(response.body));
+    EXPECT_EQ(std::get<ErrorResponse>(response.body).code, "STATISTICS_NOT_FOUND");
+}
+
+TEST(ProtocolSession, ConcurrentClientsKeepDeviceStatisticsIndependent)
+{
+    TestServer fixture;
+    Socket first = fixture.client();
+    Socket second = fixture.client();
+    expect_send(first, make_frame(Request{1U, Command{telemetryhub::protocol::RegisterDevice{"client-a"}}}));
+    expect_send(second, make_frame(Request{1U, Command{telemetryhub::protocol::RegisterDevice{"client-b"}}}));
+    EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::DeviceRegistered>(read_response(first).body));
+    EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::DeviceRegistered>(read_response(second).body));
+
+    expect_send(first, make_frame(Request{2U, Command{telemetryhub::protocol::SubmitTelemetry{"m", 10.0}}}));
+    expect_send(second, make_frame(Request{2U, Command{telemetryhub::protocol::SubmitTelemetry{"m", 30.0}}}));
+    EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(read_response(first).body));
+    EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(read_response(second).body));
+
+    expect_send(first, make_frame(Request{3U, Command{telemetryhub::protocol::GetStatistics{"m"}}}));
+    expect_send(second, make_frame(Request{3U, Command{telemetryhub::protocol::GetStatistics{"m"}}}));
+    const auto first_stats = read_response(first);
+    const auto second_stats = read_response(second);
+    ASSERT_EQ(first_stats.request_id, 3U);
+    ASSERT_EQ(second_stats.request_id, 3U);
+    ASSERT_TRUE(std::holds_alternative<telemetryhub::protocol::Statistics>(first_stats.body));
+    ASSERT_TRUE(std::holds_alternative<telemetryhub::protocol::Statistics>(second_stats.body));
+    EXPECT_DOUBLE_EQ(std::get<telemetryhub::protocol::Statistics>(first_stats.body).mean, 10.0);
+    EXPECT_DOUBLE_EQ(std::get<telemetryhub::protocol::Statistics>(second_stats.body).mean, 30.0);
+}
 TEST(ProtocolSession, UnregisteredCommandsReturnDeviceNotRegistered)
 {
     TestServer fixture;
@@ -324,7 +376,9 @@ TEST(ProtocolSession, CorrelatedValidationErrorFlushesThenClosesOnlyThatClient)
 TEST(ProtocolSession, TerminalBatchUsesOnlyNonblockingOutboundAdmissions)
 {
     auto registrations = std::make_shared<telemetryhub::server::DeviceRegistrationRegistry>();
-    auto ingress = std::make_shared<telemetryhub::server::CommandIngress>();
+    TelemetryStore store;
+    TelemetryProcessor processor{store};
+    auto ingress = std::make_shared<telemetryhub::server::CommandIngress>(processor);
     telemetryhub::server::ProtocolSessionHandler handler{registrations, ingress};
     const ConnectionId connection_id{44U};
     auto callbacks = handler.callbacks_for(connection_id);
@@ -387,17 +441,20 @@ TEST(ProtocolSession, SaturationReturnsCorrelatedServerBusyInMixedBatch)
     {
         const auto response = read_response(client);
         EXPECT_EQ(response.request_id, request_id);
-        ASSERT_TRUE(std::holds_alternative<ErrorResponse>(response.body));
-        EXPECT_EQ(std::get<ErrorResponse>(response.body).code, "PROCESSING_UNAVAILABLE");
+        EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(response.body));
     }
 }
 TEST(ProtocolSession, DelayedResponseForDisconnectedConnectionCannotReachReconnect)
 {
     std::latch response_entered{1};
     std::latch release_response{1};
+    std::atomic<bool> hold_first_response{true};
     TestServer fixture{4U, [&] {
-        response_entered.count_down();
-        release_response.wait();
+        if (hold_first_response.exchange(false))
+        {
+            response_entered.count_down();
+            release_response.wait();
+        }
     }};
 
     Socket old_client = fixture.client();
@@ -420,9 +477,17 @@ TEST(ProtocolSession, DelayedResponseForDisconnectedConnectionCannotReachReconne
     EXPECT_NE(ids.front(), old_id);
 
     release_response.count_down();
-    expect_send(new_client, make_frame(Request{4U, Command{telemetryhub::protocol::Ping{}}}));
+    expect_send(new_client, make_frame(Request{4U, Command{telemetryhub::protocol::GetStatistics{"m"}}}));
+    const auto persisted = read_response(new_client);
+    ASSERT_EQ(persisted.request_id, 4U);
+    ASSERT_TRUE(std::holds_alternative<telemetryhub::protocol::Statistics>(persisted.body));
+    const auto& stats = std::get<telemetryhub::protocol::Statistics>(persisted.body);
+    EXPECT_EQ(stats.sample_count, 1U);
+    EXPECT_DOUBLE_EQ(stats.last_value, 4.0);
+
+    expect_send(new_client, make_frame(Request{5U, Command{telemetryhub::protocol::Ping{}}}));
     const auto pong = read_response(new_client);
-    EXPECT_EQ(pong.request_id, 4U);
+    EXPECT_EQ(pong.request_id, 5U);
     EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::Pong>(pong.body));
 }
 TEST(ProtocolSession, FatalZeroLengthFrameClosesOnlyThatConnection)
@@ -439,6 +504,57 @@ TEST(ProtocolSession, FatalZeroLengthFrameClosesOnlyThatConnection)
     EXPECT_EQ(read_response(healthy).request_id, 102U);
 }
 
+
+TEST(ProtocolSession, IngressDrainsAcceptedTelemetryWhileServerRemainsAlive)
+{
+    std::latch first_response_entered{1};
+    std::latch release_first_response{1};
+    std::atomic<bool> hold_first{true};
+    TestServer fixture{4U, [&] {
+        if (hold_first.exchange(false))
+        {
+            first_response_entered.count_down();
+            release_first_response.wait();
+        }
+    }};
+    Socket client = fixture.client();
+    expect_send(client, make_frame(Request{1U, Command{telemetryhub::protocol::RegisterDevice{"drain-device"}}}));
+    EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::DeviceRegistered>(read_response(client).body));
+
+    expect_send(client, make_frame(Request{2U, Command{telemetryhub::protocol::SubmitTelemetry{"m", 1.0}}}));
+    first_response_entered.wait();
+    const ConnectionId connection_id = fixture.server.connection_ids().front();
+    const auto queued = fixture.ingress->submit(telemetryhub::server::CommandEnvelope{
+        connection_id,
+        3U,
+        "drain-device",
+        telemetryhub::server::ProcessingCommand{
+            telemetryhub::protocol::SubmitTelemetry{"m", 3.0}},
+        std::chrono::system_clock::now(),
+        2U});
+    ASSERT_EQ(queued, telemetryhub::server::CommandAdmission::accepted);
+
+    std::latch shutdown_started{1};
+    auto shutdown = std::async(std::launch::async, [&] {
+        shutdown_started.count_down();
+        fixture.ingress->shutdown();
+    });
+    shutdown_started.wait();
+    release_first_response.count_down();
+    ASSERT_EQ(shutdown.wait_for(3s), std::future_status::ready);
+    shutdown.get();
+
+    EXPECT_TRUE(fixture.server.is_running());
+    for (const std::uint64_t request_id : {2U, 3U})
+    {
+        const auto response = read_response(client);
+        EXPECT_EQ(response.request_id, request_id);
+        EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(response.body));
+    }
+    const auto stats = fixture.store.statistics_for("drain-device", "m");
+    ASSERT_TRUE(stats.has_value());
+    EXPECT_EQ(stats->sample_count, 2U);
+}
 TEST(DeviceRegistrationRegistry, DeviceLookupReturnsConnectionOwnedSnapshot)
 {
     telemetryhub::server::DeviceRegistrationRegistry registry;

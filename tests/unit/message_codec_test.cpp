@@ -390,4 +390,15 @@ TEST(MessageCodec, KeepsJsonLibraryOutOfPublicHeadersAndReusesFramingPayload)
     static_assert(std::is_same_v<RequestId, std::uint64_t>);
 }
 
+TEST(MessageCodec, RoundTripsStatisticsNotFoundApplicationError)
+{
+    const Response response{91U, ErrorResponse{"STATISTICS_NOT_FOUND", "No samples are available"}};
+    const auto encoded = serialize_response_payload(response);
+    ASSERT_FALSE(encoded.error.has_value());
+
+    const auto parsed = parse_response_payload(encoded.payload);
+    const auto* decoded = std::get_if<Response>(&parsed);
+    ASSERT_NE(decoded, nullptr);
+    EXPECT_EQ(*decoded, response);
+}
 } // namespace

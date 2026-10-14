@@ -3,6 +3,7 @@
 #include <telemetryhub/protocol/message_codec.hpp>
 #include <telemetryhub/protocol/message_framer.hpp>
 
+#include <chrono>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -69,12 +70,13 @@ struct ProtocolConnectionState
         auto parsed = protocol::parse_request_payload(payload);
         if (const auto* request = std::get_if<protocol::Request>(&parsed))
         {
+            const domain::ReceivedAt received_at = std::chrono::system_clock::now();
             Response response{request->request_id, ResponseBody{protocol::Pong{}}};
             bool queued_for_processing = false;
             bool ingress_closed = false;
             std::visit(
                 [&response, &state, request_id = request->request_id,
-                 connection_id = state->connection_id, &queued_for_processing, &ingress_closed](const auto& command) {
+                 connection_id = state->connection_id, received_at, &queued_for_processing, &ingress_closed](const auto& command) {
                     using Command = std::decay_t<decltype(command)>;
                     if constexpr (std::is_same_v<Command, protocol::Ping>)
                     {
@@ -112,8 +114,10 @@ struct ProtocolConnectionState
                         }
 
                         ProcessingCommand processing_command{command};
-                        const CommandAdmission admission = state->ingress->submit(CommandEnvelope{
-                            connection_id, request_id, *device_id, std::move(processing_command)});
+                        CommandEnvelope envelope{
+                            connection_id, request_id, *device_id, std::move(processing_command)};
+                        envelope.received_at = received_at;
+                        const CommandAdmission admission = state->ingress->submit(std::move(envelope));
                         switch (admission)
                         {
                         case CommandAdmission::accepted:
@@ -125,6 +129,10 @@ struct ProtocolConnectionState
                             break;
                         case CommandAdmission::closed:
                             ingress_closed = true;
+                            break;
+                        case CommandAdmission::sequence_exhausted:
+                            response.body = ErrorResponse{
+                                "PROCESSING_UNAVAILABLE", "Server receive sequence space is exhausted"};
                             break;
                         }
                     }

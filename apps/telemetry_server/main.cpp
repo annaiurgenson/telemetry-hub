@@ -1,3 +1,5 @@
+#include <telemetryhub/domain/telemetry_processor.hpp>
+#include <telemetryhub/domain/telemetry_store.hpp>
 #include <telemetryhub/network/tcp_server.hpp>
 #include <telemetryhub/server/command_ingress.hpp>
 #include <telemetryhub/server/device_registration_registry.hpp>
@@ -9,8 +11,10 @@
 
 int main()
 {
+    telemetryhub::domain::TelemetryStore store;
+    telemetryhub::domain::TelemetryProcessor processor{store};
+    auto ingress = std::make_shared<telemetryhub::server::CommandIngress>(processor);
     auto registrations = std::make_shared<telemetryhub::server::DeviceRegistrationRegistry>();
-    auto ingress = std::make_shared<telemetryhub::server::CommandIngress>();
     auto handler = std::make_shared<telemetryhub::server::ProtocolSessionHandler>(registrations, ingress);
 
     telemetryhub::network::TcpServerConfig config;
@@ -32,15 +36,15 @@ int main()
     }
     catch (...)
     {
-        // The response sink captures server by reference, so drain and join the
-        // consumer before server teardown on every exceptional exit as well.
+        // The response sink captures server by reference. Drain and join ingress
+        // before server teardown on every exceptional exit as well.
         ingress->shutdown();
         server.shutdown();
         throw;
     }
 
-    // Stop producers first, drain accepted commands through the live transport,
-    // then stop sessions. Callback owners remain alive until server shutdown joins them.
+    // Stop producers, drain accepted commands through the live server, then stop
+    // sessions. Processor and store outlive ingress and all session callbacks.
     ingress->shutdown();
     server.shutdown();
     return server.shutdown_error() ? 1 : 0;
