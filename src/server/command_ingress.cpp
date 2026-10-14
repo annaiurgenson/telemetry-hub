@@ -6,6 +6,7 @@
 #include <telemetryhub/server/processing_response.hpp>
 
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <utility>
 
@@ -32,8 +33,10 @@ namespace {
 
 CommandIngress::CommandIngress(
     domain::TelemetryProcessor& processor,
+    concurrency::WorkerPool& worker_pool,
     const std::size_t capacity)
     : processor_{processor},
+      worker_pool_{worker_pool},
       commands_{capacity}
 {
 }
@@ -154,23 +157,64 @@ void CommandIngress::consume(const ResponseSink& response_sink) noexcept
             {
                 break;
             }
-            process_and_respond(*item.value, response_sink);
+            dispatch(std::move(*item.value), response_sink);
         }
     }
     catch (...)
     {
-        // No exception may escape the owned consumer thread.
+        // No exception may escape the owned dispatcher thread.
+    }
+}
+
+void CommandIngress::dispatch(
+    CommandEnvelope envelope,
+    const ResponseSink& response_sink) noexcept
+{
+    std::shared_ptr<CommandEnvelope> owned_envelope;
+    try
+    {
+        owned_envelope = std::make_shared<CommandEnvelope>(std::move(envelope));
+        auto submission = worker_pool_.submit(
+            [owned_envelope, processor = &processor_, response_sink]() noexcept {
+                process_and_respond(*owned_envelope, *processor, response_sink);
+            });
+        if (submission.status == concurrency::SubmitStatus::accepted)
+        {
+            // WorkerPool::submit returns accepted only after queue admission; its
+            // future moves are noexcept. The task owns the envelope and contains
+            // all command exceptions, so retaining or reading the future is not
+            // needed. On rejection, owned_envelope remains available below.
+            return;
+        }
+    }
+    catch (...)
+    {
+        // Task/future construction or queue allocation failed before the
+        // WorkerPool reported acceptance. Preserve this command for one inline
+        // processing attempt rather than silently dropping it.
+    }
+
+    if (owned_envelope)
+    {
+        process_and_respond(*owned_envelope, processor_, response_sink);
+    }
+    else
+    {
+        // If shared handoff allocation itself failed, the local envelope was
+        // not moved into an object and remains available for the same recovery.
+        process_and_respond(envelope, processor_, response_sink);
     }
 }
 
 void CommandIngress::process_and_respond(
     const CommandEnvelope& envelope,
+    domain::TelemetryProcessor& processor,
     const ResponseSink& response_sink) noexcept
 {
     bool sink_invoked = false;
     try
     {
-        const protocol::Response response = make_processing_response(envelope, processor_);
+        const protocol::Response response = make_processing_response(envelope, processor);
         auto frame = encode_response(response);
         if (!frame.has_value())
         {
@@ -212,7 +256,7 @@ void CommandIngress::attempt_fallback_response(
     }
     catch (...)
     {
-        // A failed fallback cannot stop draining later accepted commands.
+        // A failed fallback cannot stop dispatching later accepted commands.
     }
 }
 

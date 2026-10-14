@@ -1,6 +1,7 @@
 #pragma once
 
 #include <telemetryhub/concurrency/bounded_blocking_queue.hpp>
+#include <telemetryhub/concurrency/worker_pool.hpp>
 #include <telemetryhub/domain/telemetry_processor.hpp>
 #include <telemetryhub/server/command_envelope.hpp>
 
@@ -16,6 +17,8 @@
 namespace telemetryhub::server {
 
 inline constexpr std::size_t default_incoming_command_queue_capacity = 1'024U;
+inline constexpr std::size_t default_telemetry_worker_count = 4U;
+inline constexpr std::size_t default_worker_pool_task_queue_capacity = 1'024U;
 
 enum class CommandAdmission
 {
@@ -33,6 +36,7 @@ public:
 
     explicit CommandIngress(
         domain::TelemetryProcessor& processor,
+        concurrency::WorkerPool& worker_pool,
         std::size_t capacity = default_incoming_command_queue_capacity);
     ~CommandIngress() noexcept;
 
@@ -41,26 +45,32 @@ public:
 
     // Concurrent submit() and shutdown() are supported. The object must outlive
     // all public calls; destruction must not overlap an external call.
-    // The sink runs on the consumer thread, must return promptly, and must not
-    // call shutdown() or destroy this object. Start once before enabling callbacks.
-    // The consumer owns the sink until it drains and exits; shutdown joins it.
+    // Worker tasks own their command and sink. The sink may be invoked
+    // concurrently, must return promptly, and must not call shutdown() or
+    // destroy this object. Start once before enabling callbacks.
     void start(ResponseSink response_sink);
     [[nodiscard]] CommandAdmission submit(CommandEnvelope envelope);
-    // Closes admission, drains accepted commands, and joins the consumer.
+    // Closes admission, dispatches accepted commands, and joins the consumer.
+    // The borrowed WorkerPool must remain active until shutdown() returns.
     void shutdown() noexcept;
 
 private:
     [[nodiscard]] std::optional<domain::ReceiveSequence> allocate_receive_sequence() noexcept;
     void consume(const ResponseSink& response_sink) noexcept;
-    void process_and_respond(
-        const CommandEnvelope& envelope,
+    void dispatch(
+        CommandEnvelope envelope,
         const ResponseSink& response_sink) noexcept;
-    void attempt_fallback_response(
+    static void process_and_respond(
+        const CommandEnvelope& envelope,
+        domain::TelemetryProcessor& processor,
+        const ResponseSink& response_sink) noexcept;
+    static void attempt_fallback_response(
         const CommandEnvelope& envelope,
         const ResponseSink& response_sink,
         bool& sink_invoked) noexcept;
 
     domain::TelemetryProcessor& processor_;
+    concurrency::WorkerPool& worker_pool_;
     concurrency::BoundedBlockingQueue<CommandEnvelope> commands_;
     std::atomic<domain::ReceiveSequence> last_receive_sequence_{0U};
     std::mutex lifecycle_mutex_;

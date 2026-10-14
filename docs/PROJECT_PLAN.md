@@ -14,9 +14,9 @@ TCP bytes
   -> MessageFramer / JSON parser
   -> CommandEnvelope
   -> bounded incoming queue
-  -> WorkerPool / TelemetryProcessor / TelemetryStore
-  -> bounded completed-response queue
-  -> ResponseDispatcher
+  -> ingress dispatcher
+  -> bounded WorkerPool task queue / TelemetryProcessor / TelemetryStore
+  -> thread-safe TcpServer::try_enqueue
   -> bounded per-connection outbound queue
   -> ClientSession writer
   -> framed TCP bytes
@@ -28,7 +28,7 @@ TCP bytes
 - **Command model:** a `std::variant` represents typed commands. `CommandEnvelope` carries request, connection, and registered-device context without owning a socket.
 - **Concurrency:** bounded queues provide backpressure. A fixed worker pool processes commands; workers never call `send()`.
 - **Domain:** `TelemetryProcessor` validates and executes commands. `TelemetryStore` synchronizes statistics independently of networking.
-- **Responses:** an optional global completed-response queue and single dispatcher route responses by `ConnectionId` to per-connection outbound queues.
+- **Responses:** workers call the thread-safe, nonblocking response sink directly; `TcpServer::try_enqueue` routes by `ConnectionId` to each bounded outbound queue. There is no global completed-response queue or dispatcher.
 - **Observability:** a small dependency-free, thread-safe logger will eventually record severity, timestamp, thread ID, message, and optional `std::source_location`.
 
 ## Approved protocol and behavior
@@ -60,15 +60,15 @@ TCP bytes
 
 ### Backpressure and overload
 
-- The processing path uses a bounded global incoming-command queue, a bounded completed-response queue when used, and one bounded outbound-message queue per connection.
-- Capacities are named configuration values; defaults will be proposed in the implementing milestone.
+- The processing path uses a bounded global incoming-command queue, a bounded WorkerPool task queue, and one bounded outbound-message queue per connection.
+- Capacities are named configuration values: incoming and worker-task queues default to 1,024 each; the worker count defaults to four.
 - The global incoming-command queue is bounded (default 1,024); a nonblocking submission that finds it full returns `SERVER_BUSY` when the per-connection outbound queue can admit the response.
 - Each connection outbound queue is bounded. A nonblocking enqueue that finds it full closes only that slow connection; immediate protocol errors and consumer responses use the same queue and byte limits.
 
 ## Ownership, concurrency, and shutdown
 
 - Resource-owning handles are RAII-based and move-only where appropriate. There are no owning raw pointers or detached threads.
-- The initial I/O model is one accept thread, one reader and writer per connection, a fixed-size worker pool, and one dispatcher thread if the global completed-response queue is used.
+- The I/O model is one accept thread, one reader and writer per connection, one ingress dispatcher, and a fixed-size worker pool.
 - Owned threads use `std::jthread` and `std::stop_token`. Response ordering within a connection is not guaranteed.
 - Connection sockets are configured nonblocking. Per-connection I/O loops use finite-timeout WSAPoll waits and check stop tokens between waits. TcpServer owns WinsockRuntime, the listener, and a mutex-protected registry of sessions; each ClientSession owns its socket while reader and writer threads borrow the handle. The accept thread removes completed sessions under the registry lock, then joins and destroys them without holding that lock. Shutdown closes enqueue admission, stops and joins acceptance, closes the listener, closes session outbound queues, and requests checked shutdown(SD_BOTH) on active sockets. Finite-timeout polling and stop tokens remain the reliable cancellation mechanism; local socket shutdown is an additional cooperative step. I/O threads are joined before session sockets are released. Shutdown then waits for all admitted enqueue operations to finish before releasing its session owners and Winsock.
 - Lock order is lifecycle_mutex_ then enqueue_mutex_ only for start/shutdown admission transitions. Enqueue admission releases enqueue_mutex_ before looking up a session under registry_mutex_; these locks are never nested. No lifecycle or registry lock is held during queue waits, thread joins, or the in-flight operation barrier wait.
@@ -175,7 +175,7 @@ Milestone 2A adds only the platform resource foundation. `WinsockRuntime` is a n
 - Establish one localhost server connection and one client connection using `bind()`, `listen()`, `accept()`, and `connect()` with explicit Winsock error handling.
 - Complete a minimal `PING`/`PONG` exchange as raw bounded bytes, with helpers that handle partial writes and bounded reads without assuming TCP message boundaries.
 - Add deterministic localhost integration tests for connection establishment, complete writes, bounded reads, peer closure, and expected error paths. Active receive interruption is covered by the Milestone 2D stop-aware I/O helpers.
-- Keep length-prefixed framing, JSON, typed protocol messages, request IDs, telemetry processing, worker-pool integration, client-session architecture, and application composition deferred to later milestones.
+- Keep length-prefixed framing, JSON, typed protocol messages, request IDs, telemetry processing, client-session architecture, and application composition deferred to later milestones.
 - Exit: the one-server/one-client localhost exchange, bounded I/O behavior, error paths, and peer-closure tests pass repeatedly without external network access or leaked sockets/threads.
 
 Milestone 2B uses focused free functions rather than a server or session abstraction. Setup operations throw `std::system_error` with Winsock codes and operation context. `send_all()` succeeds only after the full byte span is written and otherwise reports both the sent prefix length and error. `receive_some()` reads no more than its nonempty caller-provided buffer and distinguishes data, graceful peer closure, and error. Buffer lengths are safely limited to Winsock's `int` range per call. The Milestone 2B transport began as blocking, IPv4-loopback-only I/O without cancellation; Milestone 2D replaces the I/O path with nonblocking sockets and stop-aware polling. The complete-send loop handles partial `send()` results when Winsock returns them; tests use constrained buffers to exercise complete writes and backpressure.
@@ -227,7 +227,7 @@ Milestone 2B uses focused free functions rather than a server or session abstrac
 - Until protocol integration, the reader uses a fixed 4 KiB receive buffer and discards received application bytes. `TcpServer::enqueue()` is the production interface for sending already encoded owned bytes; it waits for bounded queue capacity and accepts a stop token. Stopping a session cancels unsent queued buffers.
 - Exit: localhost integration tests cover start/stop, concurrent clients, unique IDs, connection-limit rejection, peer-close reaping, writer delivery, idle cancellation, enqueue admission after shutdown begins, enqueue blocked by a full outbound queue, enqueue/disconnect/reaping/shutdown races, active reader/writer shutdown, peer closure before local shutdown, concurrent shutdown calls, and restart cycles.
 
-Milestone 4B integrates per-connection framing, typed protocol handling, and device registration. Milestone 4C adds the bounded incoming-command queue and immediate overload handling; domain processing and completed-response dispatch remain in Milestone 5.
+Milestone 4B integrates per-connection framing, typed protocol handling, and device registration. Milestone 4C adds the bounded incoming-command queue and immediate overload handling; domain processing remains in Milestone 5.
 
 #### Milestone 4B - Protocol integration and device registration (complete)
 
@@ -246,8 +246,8 @@ Milestone 4B integrates per-connection framing, typed protocol handling, and dev
 - `CommandIngress` owns one bounded queue (default 1,024) and one `std::jthread` consumer. `try_push` is nonblocking. The consumer currently returns correlated `PROCESSING_UNAVAILABLE` responses through `TcpServer::try_enqueue`, retaining the originating `ConnectionId`; it performs no domain work.
 - `DeviceRegistrationRegistry::device_for_connection` returns a synchronized owned snapshot. Disconnect cleanup remains compare-and-erase by `ConnectionId`.
 - A full incoming queue returns a correlated `SERVER_BUSY` with one nonblocking outbound admission attempt. A full per-connection outbound queue requests closure of that connection after releasing queue/registry locks. PING and registration remain immediate. Commands are admitted in frame order within a batch, and immediate responses are queued by the reader in that same order. Consumer responses are asynchronous and may interleave with or overtake those immediate responses; clients correlate by request ID. A closed ingress closes only the submitting session.
-- Shutdown closes ingress admission, closes the queue, drains accepted envelopes through the consumer, and joins it while `TcpServer` remains alive. The application then shuts down the server and joins all session I/O. Exceptional exits after ingress startup use the same ingress-before-server order. Session callbacks retain shared ownership of ingress and registrations until the server joins them. The ingress lifecycle mutex is released before queue operations and joins; the sink runs on the consumer, must return promptly, and must not call ingress shutdown or destroy it. Concurrent submit/shutdown is supported, while destruction must not overlap an external public call.
-- This milestone does not add the global completed-response queue, workers, `SERVER_BUSY` policy beyond immediate queue saturation, telemetry processing, storage, or response dispatch. Those remain in Milestone 5.
+- Shutdown closes ingress admission, closes the queue, drains accepted envelopes through the consumer, and joins it while `TcpServer` remains alive. The application next shuts down the WorkerPool, which drains accepted tasks while the server is live, then shuts down the server and joins all session I/O. Exceptional exits after ingress startup use the same ingress-before-server order. Session callbacks retain shared ownership of ingress and registrations until the server joins them. The ingress lifecycle mutex is released before queue operations and joins; the sink runs on the consumer, must return promptly, and must not call ingress shutdown or destroy it. Concurrent submit/shutdown is supported, while destruction must not overlap an external public call.
+- This milestone did not add workers, telemetry processing, or storage. The approved Milestone 5D design uses direct worker response-sink enqueue; no completed-response queue or dispatcher is added.
 - Exit: unit tests cover bounded admission, full/closed results, correlated unavailable responses, drain-on-close, and concurrent submit/shutdown. Integration tests cover queue saturation in a mixed batch, `SERVER_BUSY` correlation, stale response isolation across disconnect/reconnect, registration snapshots, malformed-client isolation, and slow-client isolation when outbound capacity is exhausted.
 
 ### Milestone 5 - Telemetry processing
@@ -267,22 +267,27 @@ Milestone 4B integrates per-connection framing, typed protocol handling, and dev
 - Submission outcomes distinguish accepted, invalid input, capacity reached, count overflow, and numeric failure. Statistics queries distinguish invalid input from a valid key with no statistics (`statistics_not_found`). Count overflow and numeric failure remain explicitly mapped even though the current public store API does not offer a practical way to trigger them in focused tests.
 - The caller supplies server receive time and receive sequence. The store counts every successful sample and uses the greatest receive sequence to select last value/time; equal sequences preserve the existing last fields.
 - The processor borrows the store, which must outlive it and every invocation/task using it. Processor calls can run concurrently without another processor mutex because store operations are synchronized. A successful submission is returned only after the synchronized update completes. Queries return the store snapshot at their execution point; concurrent requests are not forced into receive order. A query made after observing a successful submission result sees that committed sample when it queries the same store and device/metric key.
-- Protocol error conversion, response dispatch, receive metadata propagation, and processing integration are implemented by Milestone 5C; WorkerPool execution remains for 5D.
+- Protocol error conversion, response dispatch, receive metadata propagation, and processing integration are implemented by Milestone 5C; WorkerPool execution is integrated in 5D.
 
 #### Milestone 5C - End-to-end telemetry processing (complete)
 
 - `CommandEnvelope` owns the registered device snapshot, typed command, receive time, and receive sequence. The session handler records `system_clock::now()` after parsing a valid request and before registration lookup or ingress admission. `CommandIngress` atomically allocates a nonzero sequence starting at one before each admission attempt; rejected/full attempts may leave gaps. `UINT64_MAX` is usable once, after which ingress returns `sequence_exhausted` without wrapping and the session emits `PROCESSING_UNAVAILABLE`.
-- The existing single ingress consumer calls `TelemetryProcessor`, maps successful submissions to `TELEMETRY_ACCEPTED`, and serializes complete statistics snapshots. Timestamps use UTC RFC 3339 format with millisecond precision, truncating sub-millisecond time. Invalid processing input maps to `INVALID_FIELD_VALUE`; missing statistics map to `STATISTICS_NOT_FOUND`; capacity, count overflow, numeric failure, and sequence exhaustion map to `PROCESSING_UNAVAILABLE`. `SERVER_BUSY` is reserved for incoming queue saturation.
+- Worker tasks call `TelemetryProcessor`, map successful submissions to `TELEMETRY_ACCEPTED`, and serialize complete statistics snapshots. Timestamps use UTC RFC 3339 format with millisecond precision, truncating sub-millisecond time. Invalid processing input maps to `INVALID_FIELD_VALUE`; missing statistics map to `STATISTICS_NOT_FOUND`; capacity, count overflow, numeric failure, and sequence exhaustion map to `PROCESSING_UNAVAILABLE`. `SERVER_BUSY` is reserved for incoming queue saturation.
 - A command-level failure before calling the response sink receives at most one generic `PROCESSING_UNAVAILABLE` fallback attempt. Once sink invocation begins, the command is never retried because the sink may already have admitted the response. Per-command failures do not terminate draining of later accepted work. Ingress drains and joins before server shutdown, including exceptional application exit.
-- `telemetry_server` owns store, processor, and ingress in dependency order. Existing end-to-end routing continues to use the originating `ConnectionId`; each connection's writer remains the sole socket writer. One consumer preserves its queue execution order, while general receive ordering across concurrent producers is not promised. WorkerPool integration is deferred to 5D.
+- `telemetry_server` owns store, processor, and ingress in dependency order. Existing end-to-end routing continues to use the originating `ConnectionId`; each connection's writer remains the sole socket writer. Multiple workers may complete commands out of order. Receive sequence selects the last-value fields independently of processing completion order; queries observe state when their worker executes.
 - Exit: unit tests cover wire response mapping, timestamp boundaries and truncation, queue-full gaps, command-failure handling, and drain semantics. Localhost tests cover end-to-end submission/statistics, registration requirements, `STATISTICS_NOT_FOUND`, mixed-batch saturation, reconnect isolation, multi-client device isolation, and ingress drain while the server remains live.
 
-#### Remaining Milestone 5 work
+#### Milestone 5D - WorkerPool integration (complete)
 
-- **5D — WorkerPool integration:** concurrent command execution, bounded dispatch, shutdown correctness, and end-to-end concurrency tests.
+- `CommandIngress` owns one bounded incoming queue (default 1,024) and one dispatcher thread. The application composes a fixed four-thread `WorkerPool` with a bounded 1,024 task queue. The dispatcher transfers each owned envelope to the pool; bounded blocking admission propagates pressure back to the incoming queue. Once that queue is full, new submissions receive `SERVER_BUSY`.
+- Maximum accepted in-flight work at the defaults is 2,053 commands: 1,024 in ingress, 1,024 in the worker queue, four active workers, and at most one command held by the dispatcher during blocked admission. No unbounded task or future collection is created.
+- Worker tasks own their envelope and a copy of the thread-safe response sink. `TcpServer::try_enqueue` is nonblocking and routes by `ConnectionId` into the bounded session queue. Workers never write sockets; the session writer remains the sole sender. Responses may complete out of order and retain their request IDs. Failed or throwing response admission is handled without retrying an ambiguous response.
+- The synchronized store uses receive sequence, rather than worker completion order, to select last value/time; all successful samples contribute to aggregates. Statistics queries observe the state at worker execution. An acknowledgment is built only after its store update commits and is then admitted to the outbound queue.
+- Shutdown closes ingress admission and joins its dispatcher, then closes and joins the WorkerPool to drain accepted tasks while the server and response sink remain alive, then shuts down sessions. Store and processor lifetimes extend past all tasks. Normal and exceptional application exits use this order.
+- There is no global completed-response queue or response dispatcher. The `AGENTS.md` rule now allows direct response-sink enqueue when it is thread-safe and nonblocking, session queues are bounded, failed admission is handled, and workers finish before the sink/server are destroyed.
+- Exit: unit tests cover concurrent worker execution, response correlation and out-of-order completion, saturation/backpressure, sink failure, and draining. Localhost tests cover `SERVER_BUSY` after bounded queue saturation and orderly ingress/pool/server shutdown.
 
-Each remaining milestone requires explicit approval before work begins.
-
+Each future milestone requires explicit approval before work begins.
 ### Milestone 6 - Production-quality improvements
 
 - Add structured logging, configuration, broader integration tests, static analysis, supported sanitizers, CI, and architecture/protocol documentation.
@@ -292,8 +297,7 @@ Each remaining milestone requires explicit approval before work begins.
 
 These remain intentionally deferred until their implementing milestone:
 
-- Default capacities and exact full-queue wait thresholds.
-- Worker-count default and shutdown drain-versus-cancel policy for each queue.
+- Capacities outside the telemetry incoming and worker-task queues, and exact full-queue wait thresholds.
 - Receive-sequence generation and propagation through ingress, deferred to the response-processing milestone.
 - Socket timeouts and the exact slow-client disconnect threshold.
 - Logger output destination and formatting.

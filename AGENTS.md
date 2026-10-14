@@ -23,7 +23,7 @@
 - Use `std::uint64_t` request IDs. Responses may arrive out of order and must retain both the request ID and the originating server-generated connection ID.
 - Keep `ConnectionId` separate from `device_id`; never route a response by device ID.
 - Require registration before telemetry submission or statistics queries. A device ID may have only one active connection.
-- Use bounded incoming, completed-response, and per-connection outbound queues. Workers never write sockets directly; each connection has one writer.
+- Use a bounded incoming queue and bounded per-connection outbound queues. A completed-response queue is optional; workers may enqueue directly through a thread-safe, nonblocking response sink when session queues are bounded, failed admission is handled, and workers finish before the sink/server are destroyed. Workers never write sockets directly; each connection has one writer.
 - Use one accept thread, one reader and writer per active connection, a fixed worker pool, and an optional single response dispatcher. Own them with `std::jthread`.
 - During shutdown, request cooperative stop and call `shutdown()` on active sockets to unblock Winsock operations.
 - Treat expected connection failures locally. Use exceptions for startup/unrecoverable configuration failures and catch all exceptions at thread boundaries.

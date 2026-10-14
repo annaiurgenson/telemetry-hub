@@ -1,3 +1,4 @@
+#include <telemetryhub/concurrency/worker_pool.hpp>
 #include <telemetryhub/domain/telemetry_processor.hpp>
 #include <telemetryhub/domain/telemetry_store.hpp>
 #include <telemetryhub/network/tcp_server.hpp>
@@ -13,7 +14,10 @@ int main()
 {
     telemetryhub::domain::TelemetryStore store;
     telemetryhub::domain::TelemetryProcessor processor{store};
-    auto ingress = std::make_shared<telemetryhub::server::CommandIngress>(processor);
+    telemetryhub::concurrency::WorkerPool worker_pool{
+        telemetryhub::server::default_telemetry_worker_count,
+        telemetryhub::server::default_worker_pool_task_queue_capacity};
+    auto ingress = std::make_shared<telemetryhub::server::CommandIngress>(processor, worker_pool);
     auto registrations = std::make_shared<telemetryhub::server::DeviceRegistrationRegistry>();
     auto handler = std::make_shared<telemetryhub::server::ProtocolSessionHandler>(registrations, ingress);
 
@@ -23,12 +27,12 @@ int main()
     };
 
     telemetryhub::network::TcpServer server{std::move(config)};
-    ingress->start([&server](const telemetryhub::network::ConnectionId id,
-                             std::vector<std::byte> bytes) {
-        return server.try_enqueue(id, std::move(bytes));
-    });
     try
     {
+        ingress->start([&server](const telemetryhub::network::ConnectionId id,
+                                 std::vector<std::byte> bytes) {
+            return server.try_enqueue(id, std::move(bytes));
+        });
         server.start();
         std::cout << "TelemetryHub listening on loopback port " << server.bound_port()
                   << ". Press Enter to stop.\n";
@@ -36,16 +40,18 @@ int main()
     }
     catch (...)
     {
-        // The response sink captures server by reference. Drain and join ingress
-        // before server teardown on every exceptional exit as well.
+        // The response sink captures server by reference. Drain dispatch and join
+        // workers before server teardown on every exceptional exit as well.
         ingress->shutdown();
+        worker_pool.shutdown();
         server.shutdown();
         throw;
     }
 
-    // Stop producers, drain accepted commands through the live server, then stop
-    // sessions. Processor and store outlive ingress and all session callbacks.
+    // Stop producers, join dispatch, drain accepted worker tasks through the
+    // live server, then stop sessions. Processor and store outlive all workers.
     ingress->shutdown();
+    worker_pool.shutdown();
     server.shutdown();
     return server.shutdown_error() ? 1 : 0;
 }

@@ -62,7 +62,8 @@ TEST(CommandIngress, ProcessesOwnedEnvelopeAndReturnsCorrelatedAcknowledgment)
 {
     TelemetryStore store;
     TelemetryProcessor processor{store};
-    CommandIngress ingress{processor, 2U};
+    telemetryhub::concurrency::WorkerPool worker_pool{4U, 1024U};
+    CommandIngress ingress{processor, worker_pool, 2U};
     std::promise<std::pair<ConnectionId, std::vector<std::byte>>> completed;
     auto result = completed.get_future();
     ingress.start([&completed](const ConnectionId connection_id, std::vector<std::byte> bytes) {
@@ -81,16 +82,17 @@ TEST(CommandIngress, ProcessesOwnedEnvelopeAndReturnsCorrelatedAcknowledgment)
     ASSERT_TRUE(statistics.has_value());
     EXPECT_EQ(statistics->sample_count, 1U);
     ingress.shutdown();
+    worker_pool.shutdown();
 }
 
 TEST(CommandIngress, BoundedQueueReportsFullAndShutdownDrainsAcceptedCommands)
 {
     TelemetryStore store;
     TelemetryProcessor processor{store};
-    CommandIngress ingress{processor, 1U};
+    telemetryhub::concurrency::WorkerPool worker_pool{1U, 1U};
+    CommandIngress ingress{processor, worker_pool, 1U};
     std::latch first_response_entered{1};
     std::latch release_first_response{1};
-    std::latch second_response_completed{1};
     std::atomic<unsigned int> response_count{0U};
     std::atomic<bool> hold_first{true};
     ingress.start([&](const ConnectionId, std::vector<std::byte>) {
@@ -99,41 +101,47 @@ TEST(CommandIngress, BoundedQueueReportsFullAndShutdownDrainsAcceptedCommands)
             first_response_entered.count_down();
             release_first_response.wait();
         }
-        if (response_count.fetch_add(1U) == 1U)
-        {
-            second_response_completed.count_down();
-        }
+        response_count.fetch_add(1U);
         return telemetryhub::network::EnqueueStatus::accepted;
     });
 
     EXPECT_EQ(ingress.submit(make_envelope(1U, 1U, 1.0)), CommandAdmission::accepted);
     first_response_entered.wait();
-    EXPECT_EQ(ingress.submit(make_envelope(1U, 2U, 2.0)), CommandAdmission::accepted);
-    EXPECT_EQ(ingress.submit(make_envelope(1U, 3U, 300.0)), CommandAdmission::full);
+    std::vector<double> admitted_values{1.0};
+    bool observed_full = false;
+    for (std::uint64_t request_id = 2U; request_id < 10U; ++request_id)
+    {
+        const double value = request_id == 2U ? 2.0 : static_cast<double>(request_id * 100U);
+        const auto admission = ingress.submit(make_envelope(1U, request_id, value));
+        if (admission == CommandAdmission::full)
+        {
+            observed_full = true;
+            break;
+        }
+        ASSERT_EQ(admission, CommandAdmission::accepted);
+        admitted_values.push_back(value);
+    }
+    ASSERT_TRUE(observed_full);
 
-    std::latch shutdown_started{1};
-    auto shutdown = std::async(std::launch::async, [&] {
-        shutdown_started.count_down();
-        ingress.shutdown();
-    });
-    shutdown_started.wait();
+    auto shutdown = std::async(std::launch::async, [&] { ingress.shutdown(); });
     release_first_response.count_down();
     ASSERT_EQ(shutdown.wait_for(3s), std::future_status::ready);
     shutdown.get();
-    EXPECT_EQ(response_count.load(), 2U);
-    EXPECT_EQ(ingress.submit(make_envelope(1U, 4U)), CommandAdmission::closed);
-    EXPECT_EQ(second_response_completed.try_wait(), true);
+    worker_pool.shutdown();
+
+    EXPECT_EQ(response_count.load(), admitted_values.size());
+    EXPECT_EQ(ingress.submit(make_envelope(1U, 10U)), CommandAdmission::closed);
     const auto statistics = store.statistics_for("device-snapshot", "temperature");
     ASSERT_TRUE(statistics.has_value());
-    EXPECT_EQ(statistics->sample_count, 2U);
-    EXPECT_DOUBLE_EQ(statistics->last_value, 2.0);
+    EXPECT_EQ(statistics->sample_count, admitted_values.size());
+    EXPECT_DOUBLE_EQ(statistics->last_value, admitted_values.back());
 }
-
 TEST(CommandIngress, ConcurrentShutdownCallsAreIdempotentAndDrainOnce)
 {
     TelemetryStore store;
     TelemetryProcessor processor{store};
-    CommandIngress ingress{processor, 2U};
+    telemetryhub::concurrency::WorkerPool worker_pool{4U, 1024U};
+    CommandIngress ingress{processor, worker_pool, 2U};
     std::latch response_entered{1};
     std::latch release_response{1};
     std::atomic<unsigned int> response_count{0U};
@@ -159,6 +167,7 @@ TEST(CommandIngress, ConcurrentShutdownCallsAreIdempotentAndDrainOnce)
     release_response.count_down();
     first_shutdown.join();
     second_shutdown.join();
+    worker_pool.shutdown();
 
     EXPECT_EQ(response_count.load(), 1U);
     EXPECT_EQ(ingress.submit(make_envelope(3U, 2U)), CommandAdmission::closed);
@@ -169,7 +178,8 @@ TEST(CommandIngress, ConcurrentProducerStopsAtClosedAdmission)
 {
     TelemetryStore store;
     TelemetryProcessor processor{store};
-    CommandIngress ingress{processor, 8U};
+    telemetryhub::concurrency::WorkerPool worker_pool{1U, 1U};
+    CommandIngress ingress{processor, worker_pool, 8U};
     std::latch first_response_entered{1};
     std::latch release_first_response{1};
     std::latch producer_saw_full{1};
@@ -229,6 +239,7 @@ TEST(CommandIngress, ConcurrentProducerStopsAtClosedAdmission)
     producer_thread.join();
 
     EXPECT_GT(accepted.load(), 1U);
+    worker_pool.shutdown();
     EXPECT_EQ(consumed.load(), accepted.load());
     EXPECT_EQ(store.statistics_for("device-snapshot", "temperature")->sample_count, accepted.load());
 }
@@ -237,7 +248,8 @@ TEST(CommandIngress, SinkExceptionIsNotRetriedAndLaterCommandsStillProcess)
 {
     TelemetryStore store;
     TelemetryProcessor processor{store};
-    CommandIngress ingress{processor, 4U};
+    telemetryhub::concurrency::WorkerPool worker_pool{1U, 4U};
+    CommandIngress ingress{processor, worker_pool, 4U};
     std::latch second_response_entered{1};
     std::atomic<unsigned int> invocations{0U};
     std::promise<Response> second_response;
@@ -259,7 +271,7 @@ TEST(CommandIngress, SinkExceptionIsNotRetriedAndLaterCommandsStillProcess)
     ASSERT_EQ(result.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(result.get().request_id, 11U);
     ingress.shutdown();
-
+    worker_pool.shutdown();
     EXPECT_EQ(invocations.load(), 2U);
     const auto statistics = store.statistics_for("device-snapshot", "temperature");
     ASSERT_TRUE(statistics.has_value());
@@ -273,7 +285,8 @@ TEST(CommandIngress, ConcurrentSubmissionsUseOneProcessorAndDrain)
     constexpr std::size_t submissions_per_producer = 100U;
     TelemetryStore store;
     TelemetryProcessor processor{store};
-    CommandIngress ingress{processor, producer_count * submissions_per_producer};
+    telemetryhub::concurrency::WorkerPool worker_pool{4U, 600U};
+    CommandIngress ingress{processor, worker_pool, producer_count * submissions_per_producer};
     std::atomic<std::size_t> responses{0U};
     ingress.start([&responses](const ConnectionId, std::vector<std::byte>) {
         responses.fetch_add(1U);
@@ -291,11 +304,8 @@ TEST(CommandIngress, ConcurrentSubmissionsUseOneProcessorAndDrain)
             start.wait();
             for (std::size_t index = 0; index < submissions_per_producer; ++index)
             {
-                const auto request_id = static_cast<std::uint64_t>(
-                    producer * submissions_per_producer + index + 1U);
-                const auto status = ingress.submit(make_envelope(
-                    static_cast<std::uint64_t>(producer + 1U), request_id,
-                    static_cast<double>(producer)));
+                const auto request_id = static_cast<std::uint64_t>(producer * submissions_per_producer + index + 1U);
+                const auto status = ingress.submit(make_envelope(static_cast<std::uint64_t>(producer + 1U), request_id, static_cast<double>(producer)));
                 if (status != CommandAdmission::accepted)
                 {
                     rejected.fetch_add(1U);
@@ -309,57 +319,123 @@ TEST(CommandIngress, ConcurrentSubmissionsUseOneProcessorAndDrain)
         producer.join();
     }
     ingress.shutdown();
+    worker_pool.shutdown();
 
     EXPECT_EQ(rejected.load(), 0U);
     EXPECT_EQ(responses.load(), producer_count * submissions_per_producer);
-    const auto stats = store.statistics_for("device-snapshot", "temperature");
-    ASSERT_TRUE(stats.has_value());
-    EXPECT_EQ(stats->sample_count, producer_count * submissions_per_producer);
-    EXPECT_DOUBLE_EQ(stats->minimum, 0.0);
-    EXPECT_DOUBLE_EQ(stats->maximum, static_cast<double>(producer_count - 1U));
+    const auto statistics = store.statistics_for("device-snapshot", "temperature");
+    ASSERT_TRUE(statistics.has_value());
+    EXPECT_EQ(statistics->sample_count, producer_count * submissions_per_producer);
+    EXPECT_DOUBLE_EQ(statistics->minimum, 0.0);
+    EXPECT_DOUBLE_EQ(statistics->maximum, static_cast<double>(producer_count - 1U));
+}
+TEST(CommandIngress, WorkersRunConcurrentlyAndResponsesRetainRequestIds)
+{
+    TelemetryStore store;
+    TelemetryProcessor processor{store};
+    telemetryhub::concurrency::WorkerPool worker_pool{2U, 2U};
+    CommandIngress ingress{processor, worker_pool, 4U};
+    std::latch both_workers_entered_sink{2};
+    std::latch release_first_response{1};
+    std::latch first_response_finished{1};
+    std::promise<Response> second_response;
+    auto second = second_response.get_future();
+    ingress.start([&](const ConnectionId, std::vector<std::byte> bytes) {
+        const Response response = decode_response(bytes);
+        if (response.request_id == 10U)
+        {
+            both_workers_entered_sink.count_down();
+            release_first_response.wait();
+            first_response_finished.count_down();
+        }
+        else
+        {
+            second_response.set_value(response);
+            both_workers_entered_sink.count_down();
+        }
+        return telemetryhub::network::EnqueueStatus::accepted;
+    });
+
+    EXPECT_EQ(ingress.submit(make_envelope(8U, 10U, 1.0)), CommandAdmission::accepted);
+    EXPECT_EQ(ingress.submit(make_envelope(8U, 11U, 2.0)), CommandAdmission::accepted);
+    both_workers_entered_sink.wait();
+    ASSERT_EQ(second.wait_for(2s), std::future_status::ready);
+    EXPECT_EQ(second.get().request_id, 11U);
+    release_first_response.count_down();
+    first_response_finished.wait();
+    ingress.shutdown();
+    worker_pool.shutdown();
+
+    const auto statistics = store.statistics_for("device-snapshot", "temperature");
+    ASSERT_TRUE(statistics.has_value());
+    EXPECT_EQ(statistics->sample_count, 2U);
+    EXPECT_DOUBLE_EQ(statistics->last_value, 2.0);
 }
 
 TEST(CommandIngress, RejectedFullQueueSubmissionDoesNotAlterLaterStatistics)
 {
     TelemetryStore store;
     TelemetryProcessor processor{store};
-    CommandIngress ingress{processor, 1U};
+    telemetryhub::concurrency::WorkerPool worker_pool{1U, 1U};
+    CommandIngress ingress{processor, worker_pool, 1U};
     std::latch first_response_entered{1};
     std::latch release_first_response{1};
-    std::latch second_response_completed{1};
-    std::latch third_response_completed{1};
-    std::atomic<unsigned int> response_count{0U};
-    ingress.start([&](const ConnectionId, std::vector<std::byte>) {
-        const unsigned int current = response_count.fetch_add(1U);
-        if (current == 0U)
+    std::atomic<bool> hold_first{true};
+    std::atomic<std::size_t> response_count{0U};
+    std::atomic<std::size_t> initial_target{0U};
+    std::promise<void> initial_responses_completed;
+    auto initial_done = initial_responses_completed.get_future();
+    std::promise<void> later_response_completed;
+    auto later_done = later_response_completed.get_future();
+    ingress.start([&](const ConnectionId, std::vector<std::byte> bytes) {
+        if (hold_first.exchange(false))
         {
             first_response_entered.count_down();
             release_first_response.wait();
         }
-        if (current == 1U)
+        const auto count = response_count.fetch_add(1U) + 1U;
+        if (count == initial_target.load())
         {
-            second_response_completed.count_down();
+            initial_responses_completed.set_value();
         }
-        if (current == 2U)
+        if (decode_response(bytes).request_id == 100U)
         {
-            third_response_completed.count_down();
+            later_response_completed.set_value();
         }
         return telemetryhub::network::EnqueueStatus::accepted;
     });
 
     EXPECT_EQ(ingress.submit(make_envelope(1U, 1U, 1.0)), CommandAdmission::accepted);
     first_response_entered.wait();
-    EXPECT_EQ(ingress.submit(make_envelope(1U, 2U, 2.0)), CommandAdmission::accepted);
-    EXPECT_EQ(ingress.submit(make_envelope(1U, 3U, 300.0)), CommandAdmission::full);
+    std::vector<double> admitted_values{1.0};
+    bool observed_full = false;
+    for (std::uint64_t request_id = 2U; request_id < 10U; ++request_id)
+    {
+        const double value = request_id == 2U ? 2.0 : static_cast<double>(request_id * 100U);
+        const auto admission = ingress.submit(make_envelope(1U, request_id, value));
+        if (admission == CommandAdmission::full)
+        {
+            observed_full = true;
+            break;
+        }
+        ASSERT_EQ(admission, CommandAdmission::accepted);
+        admitted_values.push_back(value);
+    }
+    ASSERT_TRUE(observed_full);
+    initial_target.store(admitted_values.size());
+
     release_first_response.count_down();
-    second_response_completed.wait();
-    EXPECT_EQ(ingress.submit(make_envelope(1U, 4U, 4.0)), CommandAdmission::accepted);
-    third_response_completed.wait();
+    ASSERT_EQ(initial_done.wait_for(3s), std::future_status::ready);
+    EXPECT_EQ(ingress.submit(make_envelope(1U, 100U, 4.0)), CommandAdmission::accepted);
+    ASSERT_EQ(later_done.wait_for(3s), std::future_status::ready);
     ingress.shutdown();
+    worker_pool.shutdown();
 
     const auto statistics = store.statistics_for("device-snapshot", "temperature");
     ASSERT_TRUE(statistics.has_value());
-    EXPECT_EQ(statistics->sample_count, 3U);
+    EXPECT_EQ(statistics->sample_count, admitted_values.size() + 1U);
     EXPECT_DOUBLE_EQ(statistics->last_value, 4.0);
+    EXPECT_LT(statistics->maximum, 500.0);
+    EXPECT_EQ(response_count.load(), statistics->sample_count);
 }
 } // namespace

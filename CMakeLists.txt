@@ -104,6 +104,7 @@ target_link_libraries(
         telemetryhub_network
         telemetryhub_protocol
         telemetryhub_domain
+        telemetryhub_concurrency
         telemetryhub_project_options
 )
 

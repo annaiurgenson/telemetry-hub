@@ -131,6 +131,9 @@ struct TestServer
 {
     TelemetryStore store;
     TelemetryProcessor processor{store};
+    telemetryhub::concurrency::WorkerPool worker_pool{
+        telemetryhub::server::default_telemetry_worker_count,
+        telemetryhub::server::default_worker_pool_task_queue_capacity};
     std::shared_ptr<telemetryhub::server::DeviceRegistrationRegistry> registrations =
         std::make_shared<telemetryhub::server::DeviceRegistrationRegistry>();
     std::shared_ptr<telemetryhub::server::CommandIngress> ingress;
@@ -152,8 +155,11 @@ struct TestServer
     explicit TestServer(
         const std::size_t incoming_capacity = telemetryhub::server::default_incoming_command_queue_capacity,
         std::function<void()> before_response = {},
-        const std::size_t outbound_capacity = telemetryhub::network::default_outbound_queue_capacity)
-        : ingress{std::make_shared<telemetryhub::server::CommandIngress>(processor, incoming_capacity)},
+        const std::size_t outbound_capacity = telemetryhub::network::default_outbound_queue_capacity,
+        const std::size_t worker_count = telemetryhub::server::default_telemetry_worker_count,
+        const std::size_t worker_queue_capacity = telemetryhub::server::default_worker_pool_task_queue_capacity)
+        : worker_pool{worker_count, worker_queue_capacity},
+          ingress{std::make_shared<telemetryhub::server::CommandIngress>(processor, worker_pool, incoming_capacity)},
           handler{std::make_shared<telemetryhub::server::ProtocolSessionHandler>(registrations, ingress)},
           server{make_config(handler, outbound_capacity)}
     {
@@ -171,6 +177,7 @@ struct TestServer
     ~TestServer()
     {
         ingress->shutdown();
+        worker_pool.shutdown();
         server.shutdown();
     }
 
@@ -378,7 +385,10 @@ TEST(ProtocolSession, TerminalBatchUsesOnlyNonblockingOutboundAdmissions)
     auto registrations = std::make_shared<telemetryhub::server::DeviceRegistrationRegistry>();
     TelemetryStore store;
     TelemetryProcessor processor{store};
-    auto ingress = std::make_shared<telemetryhub::server::CommandIngress>(processor);
+    telemetryhub::concurrency::WorkerPool worker_pool{
+        telemetryhub::server::default_telemetry_worker_count,
+        telemetryhub::server::default_worker_pool_task_queue_capacity};
+    auto ingress = std::make_shared<telemetryhub::server::CommandIngress>(processor, worker_pool);
     telemetryhub::server::ProtocolSessionHandler handler{registrations, ingress};
     const ConnectionId connection_id{44U};
     auto callbacks = handler.callbacks_for(connection_id);
@@ -413,36 +423,73 @@ TEST(ProtocolSession, SaturationReturnsCorrelatedServerBusyInMixedBatch)
             consumer_entered.count_down();
             release_consumer.wait();
         }
-    }};
+    }, 64U, 1U, 1U};
     Socket client = fixture.client();
 
     expect_send(client, make_frame(Request{1U, Command{telemetryhub::protocol::RegisterDevice{"queue-device"}}}));
     EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::DeviceRegistered>(read_response(client).body));
-
     expect_send(client, make_frame(Request{2U, Command{telemetryhub::protocol::SubmitTelemetry{"m", 1.0}}}));
     consumer_entered.wait();
     expect_send(client, make_frame(Request{3U, Command{telemetryhub::protocol::SubmitTelemetry{"m", 2.0}}}));
 
-    auto mixed = make_frame(Request{4U, Command{telemetryhub::protocol::Ping{}}});
-    auto overloaded = make_frame(Request{5U, Command{telemetryhub::protocol::GetStatistics{"m"}}});
-    mixed.insert(mixed.end(), overloaded.begin(), overloaded.end());
-    expect_send(client, mixed);
+    std::vector<std::byte> overload_batch;
+    for (std::uint64_t request_id = 5U; request_id < 33U; ++request_id)
+    {
+        auto frame = make_frame(Request{request_id, Command{telemetryhub::protocol::GetStatistics{"m"}}});
+        overload_batch.insert(overload_batch.end(), frame.begin(), frame.end());
+    }
+    auto ping = make_frame(Request{33U, Command{telemetryhub::protocol::Ping{}}});
+    overload_batch.insert(overload_batch.end(), ping.begin(), ping.end());
+    expect_send(client, overload_batch);
 
-    const auto pong = read_response(client);
-    EXPECT_EQ(pong.request_id, 4U);
-    EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::Pong>(pong.body));
+    bool saw_server_busy = false;
+    bool saw_pong = false;
+    for (std::size_t count = 0U; count < 32U && !saw_pong; ++count)
+    {
+        const auto response = read_response(client);
+        if (response.request_id == 33U)
+        {
+            saw_pong = std::holds_alternative<telemetryhub::protocol::Pong>(response.body);
+        }
+        else
+        {
+            ASSERT_TRUE(std::holds_alternative<ErrorResponse>(response.body));
+            EXPECT_EQ(std::get<ErrorResponse>(response.body).code, "SERVER_BUSY");
+            saw_server_busy = true;
+        }
+    }
+    EXPECT_TRUE(saw_pong);
+    EXPECT_TRUE(saw_server_busy);
+
+    expect_send(client, make_frame(Request{34U, Command{telemetryhub::protocol::GetStatistics{"m"}}}));
     const auto busy = read_response(client);
-    EXPECT_EQ(busy.request_id, 5U);
+    EXPECT_EQ(busy.request_id, 34U);
     ASSERT_TRUE(std::holds_alternative<ErrorResponse>(busy.body));
     EXPECT_EQ(std::get<ErrorResponse>(busy.body).code, "SERVER_BUSY");
 
     release_consumer.count_down();
-    for (const std::uint64_t request_id : {2U, 3U})
+    fixture.ingress->shutdown();
+    fixture.worker_pool.shutdown();
+    bool saw_first = false;
+    bool saw_second = false;
+    for (std::size_t count = 0U; count < 6U && !(saw_first && saw_second); ++count)
     {
         const auto response = read_response(client);
-        EXPECT_EQ(response.request_id, request_id);
-        EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(response.body));
+        if (response.request_id == 2U)
+        {
+            saw_first = std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(response.body);
+        }
+        else if (response.request_id == 3U)
+        {
+            saw_second = std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(response.body);
+        }
+        else
+        {
+            EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::Statistics>(response.body));
+        }
     }
+    EXPECT_TRUE(saw_first);
+    EXPECT_TRUE(saw_second);
 }
 TEST(ProtocolSession, DelayedResponseForDisconnectedConnectionCannotReachReconnect)
 {
@@ -543,14 +590,25 @@ TEST(ProtocolSession, IngressDrainsAcceptedTelemetryWhileServerRemainsAlive)
     release_first_response.count_down();
     ASSERT_EQ(shutdown.wait_for(3s), std::future_status::ready);
     shutdown.get();
+    fixture.worker_pool.shutdown();
 
     EXPECT_TRUE(fixture.server.is_running());
-    for (const std::uint64_t request_id : {2U, 3U})
+    bool saw_first = false;
+    bool saw_second = false;
+    for (std::size_t count = 0U; count < 4U && !(saw_first && saw_second); ++count)
     {
         const auto response = read_response(client);
-        EXPECT_EQ(response.request_id, request_id);
-        EXPECT_TRUE(std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(response.body));
+        if (response.request_id == 2U)
+        {
+            saw_first = std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(response.body);
+        }
+        else if (response.request_id == 3U)
+        {
+            saw_second = std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(response.body);
+        }
     }
+    EXPECT_TRUE(saw_first);
+    EXPECT_TRUE(saw_second);
     const auto stats = fixture.store.statistics_for("drain-device", "m");
     ASSERT_TRUE(stats.has_value());
     EXPECT_EQ(stats->sample_count, 2U);
