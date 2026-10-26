@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <barrier>
 #include <chrono>
@@ -13,6 +14,7 @@
 #include <cstdint>
 #include <future>
 #include <latch>
+#include <mutex>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -437,5 +439,161 @@ TEST(CommandIngress, RejectedFullQueueSubmissionDoesNotAlterLaterStatistics)
     EXPECT_DOUBLE_EQ(statistics->last_value, 4.0);
     EXPECT_LT(statistics->maximum, 500.0);
     EXPECT_EQ(response_count.load(), statistics->sample_count);
+}
+
+TEST(CommandIngress, ShutdownDrainsWhenDispatcherIsBlockedByFullWorkerPool)
+{
+    TelemetryStore store;
+    TelemetryProcessor processor{store};
+    std::latch release_worker{1};
+    std::promise<void> worker_started_promise;
+    auto worker_started = worker_started_promise.get_future();
+    std::atomic<unsigned int> blocker_executions{0U};
+    std::atomic<unsigned int> filler_executions{0U};
+    std::mutex response_mutex;
+    std::vector<std::uint64_t> response_ids;
+    std::promise<void> shutdown_started_promise;
+    auto shutdown_started = shutdown_started_promise.get_future();
+    std::future<void> shutdown;
+
+    telemetryhub::concurrency::WorkerPool worker_pool{1U, 1U};
+    CommandIngress ingress{processor, worker_pool, 1U};
+
+    struct ReleaseWorkerOnExit
+    {
+        ReleaseWorkerOnExit(
+            std::latch& gate,
+            std::future<void>& shutdown) noexcept
+            : gate_{gate}, shutdown_{shutdown}
+        {
+        }
+
+        ~ReleaseWorkerOnExit() noexcept
+        {
+            release();
+            if (shutdown_.valid())
+            {
+                shutdown_.wait();
+            }
+        }
+
+        void release() noexcept
+        {
+            if (!released_)
+            {
+                released_ = true;
+                gate_.count_down();
+            }
+        }
+
+        std::latch& gate_;
+        std::future<void>& shutdown_;
+        bool released_{false};
+    } release_worker_on_exit{release_worker, shutdown};
+
+    auto blocker_submission = worker_pool.submit([&] {
+        worker_started_promise.set_value();
+        release_worker.wait();
+        blocker_executions.fetch_add(1U);
+    });
+    ASSERT_EQ(blocker_submission.status, telemetryhub::concurrency::SubmitStatus::accepted);
+    ASSERT_TRUE(blocker_submission.future.has_value());
+    ASSERT_EQ(worker_started.wait_for(3s), std::future_status::ready);
+    worker_started.get();
+
+    auto filler_submission = worker_pool.submit([&] {
+        filler_executions.fetch_add(1U);
+    });
+    ASSERT_EQ(filler_submission.status, telemetryhub::concurrency::SubmitStatus::accepted);
+    ASSERT_TRUE(filler_submission.future.has_value());
+
+    ingress.start([&](const ConnectionId, std::vector<std::byte> bytes) {
+        const Response response = decode_response(bytes);
+        std::lock_guard lock{response_mutex};
+        response_ids.push_back(response.request_id);
+        return telemetryhub::network::EnqueueStatus::accepted;
+    });
+
+    ASSERT_EQ(ingress.submit(make_envelope(9U, 1U, 1.0)), CommandAdmission::accepted);
+
+    // A successful admission for B proves A has left ingress. The worker is
+    // still gated and the pool queue is occupied by the filler, so the single
+    // dispatcher cannot finish handing A to the pool. Keep retrying only while
+    // ingress reports full; the deadline is a safety bound, not synchronization.
+    CommandAdmission command_b_admission = CommandAdmission::full;
+    const auto command_b_deadline = std::chrono::steady_clock::now() + 3s;
+    while (command_b_admission == CommandAdmission::full &&
+           std::chrono::steady_clock::now() < command_b_deadline)
+    {
+        command_b_admission = ingress.submit(make_envelope(9U, 2U, 2.0));
+        if (command_b_admission == CommandAdmission::full)
+        {
+            std::this_thread::yield();
+        }
+    }
+    ASSERT_EQ(command_b_admission, CommandAdmission::accepted);
+    EXPECT_EQ(ingress.submit(make_envelope(9U, 3U, 300.0)), CommandAdmission::full);
+
+    shutdown = std::async(std::launch::async, [&] {
+        shutdown_started_promise.set_value();
+        ingress.shutdown();
+    });
+    ASSERT_EQ(shutdown_started.wait_for(3s), std::future_status::ready);
+
+    // Admission remains full until shutdown closes the queue. This observes
+    // queue closure without claiming to observe the dispatcher's instruction
+    // pointer inside WorkerPool::submit().
+    bool admission_closed = false;
+    bool unexpected_probe_admission = false;
+    std::uint64_t probe_request_id = 4U;
+    const auto close_deadline = std::chrono::steady_clock::now() + 3s;
+    while (!admission_closed && std::chrono::steady_clock::now() < close_deadline)
+    {
+        const CommandAdmission probe_admission = ingress.submit(
+            make_envelope(9U, probe_request_id, 100.0));
+        if (probe_admission == CommandAdmission::closed)
+        {
+            admission_closed = true;
+        }
+        else if (probe_admission == CommandAdmission::accepted)
+        {
+            unexpected_probe_admission = true;
+            ++probe_request_id;
+        }
+        else if (probe_admission == CommandAdmission::sequence_exhausted)
+        {
+            break;
+        }
+        else
+        {
+            std::this_thread::yield();
+        }
+    }
+
+    const std::future_status shutdown_before_release = shutdown.wait_for(50ms);
+    release_worker_on_exit.release();
+
+    EXPECT_TRUE(admission_closed);
+    EXPECT_FALSE(unexpected_probe_admission);
+    EXPECT_EQ(shutdown_before_release, std::future_status::timeout);
+    ASSERT_EQ(shutdown.wait_for(3s), std::future_status::ready);
+    shutdown.get();
+    worker_pool.shutdown();
+    blocker_submission.future->get();
+    filler_submission.future->get();
+
+    EXPECT_EQ(blocker_executions.load(), 1U);
+    EXPECT_EQ(filler_executions.load(), 1U);
+
+    std::sort(response_ids.begin(), response_ids.end());
+    EXPECT_EQ(response_ids, (std::vector<std::uint64_t>{1U, 2U}));
+
+    const auto statistics = store.statistics_for("device-snapshot", "temperature");
+    ASSERT_TRUE(statistics.has_value());
+    EXPECT_EQ(statistics->sample_count, 2U);
+    EXPECT_DOUBLE_EQ(statistics->minimum, 1.0);
+    EXPECT_DOUBLE_EQ(statistics->maximum, 2.0);
+    EXPECT_DOUBLE_EQ(statistics->mean, 1.5);
+    EXPECT_DOUBLE_EQ(statistics->last_value, 2.0);
 }
 } // namespace
