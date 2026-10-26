@@ -293,6 +293,16 @@ Each future milestone requires explicit approval before work begins.
 - Add structured logging, configuration, broader integration tests, static analysis, supported sanitizers, CI, and architecture/protocol documentation.
 - Exit: a clean checkout has a documented reproducible workflow enforced by CI.
 
+#### Milestone 6A - Clean Windows CI (approved)
+
+- Add one GitHub Actions job on the `windows-2022` hosted runner, triggered by pushes, pull requests, and manual dispatch. Grant only `contents: read`, and pin `actions/checkout` to an immutable commit with credential persistence disabled.
+- Configure the existing Visual Studio 2022 x64 preset from the runner's clean checkout, build all default targets with the repository's existing strict MSVC warning policy, and execute the complete CTest suite. Keep the existing pinned `FetchContent` dependencies and local development presets unchanged.
+- Before focused repeats, inspect CTest's registered names and fail if any required focused test is missing, including `CommandIngress.ShutdownDrainsWhenDispatcherIsBlockedByFullWorkerPool`. Require a nonempty selection, then repeat the explicit WorkerPool concurrency/backpressure/shutdown, CommandIngress admission/saturation/shutdown, TcpServer lifecycle/shutdown, and ProtocolSession overload/reconnect/draining cases 20 times with failure output enabled.
+- Document the clean local preset workflow, full suite, focused repeat command, and distinction between local results and GitHub-hosted CI in the README.
+- Acceptance criteria: workflow YAML and action pin are inspected; all configured presets and focused CTest names exist; native configure, build, and test command failures fail their steps; full and repeated focused CTest runs both pass on GitHub's Windows runner. Review the complete diff and require `git diff --check` to pass before committing.
+- Verification guarantee: a passing hosted run demonstrates that this workflow passed for that commit on the `windows-2022` image. Local verification and workflow inspection do not establish that a GitHub-hosted run passed.
+- Known limitations: the workflow relies on GitHub's hosted Windows image and network access for the first `FetchContent` download; this milestone does not add dependency caching or an offline build path. The workflow is not verified on GitHub until it is pushed and a hosted run completes successfully.
+
 ## Deferred implementation choices
 
 These remain intentionally deferred until their implementing milestone:

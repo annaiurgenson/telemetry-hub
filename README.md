@@ -62,6 +62,32 @@ ctest --preset windows-msvc-debug
 
 The first configure fetches the pinned GoogleTest and nlohmann/json dependencies and therefore requires network access. nlohmann/json v3.12.0 is privately linked to `telemetryhub_protocol`; it does not appear in public headers.
 
+### Clean local MSVC verification
+
+For a clean local build, use a fresh checkout or remove the generated `build/windows-msvc` directory before configuring. From a Visual Studio 2022 developer PowerShell, run:
+
+```powershell
+cmake --preset windows-msvc
+cmake --build --preset windows-msvc-debug --parallel
+ctest --preset windows-msvc-debug --output-on-failure
+```
+
+To repeat the concurrency and localhost integration suites 20 times:
+
+```powershell
+ctest --preset windows-msvc-debug `
+  --tests-regex '^(WorkerPool|CommandIngress|TcpServer|ProtocolSession)\.' `
+  --repeat until-fail:20 --output-on-failure
+```
+
+This local verification uses the checked-in CMake presets and the dependencies pinned by CMake `FetchContent`. It requires network access on the first configure unless those dependencies are already available locally.
+
+### Windows CI
+
+GitHub Actions runs on `windows-2022` for pushes, pull requests, and manual dispatch. It checks out a clean workspace, configures and builds with the existing Visual Studio 2022/MSVC presets, runs the complete CTest suite, then repeats a verified selection of worker-pool, command-ingress, TCP server, and protocol-session concurrency tests 20 times. The workflow checks that every focused test is registered, including `CommandIngress.ShutdownDrainsWhenDispatcherIsBlockedByFullWorkerPool`, before repeating the selection.
+
+Local verification runs on the developer's machine and reports only that machine's results. GitHub-hosted CI runs separately on the hosted Windows image; a local build or a committed workflow does not mean that hosted CI has run or passed. Check the repository's Actions page or the commit's status checks after pushing to verify a GitHub-hosted run.
+
 ## Status
 
 Milestones 0–3B provide the project foundation, bounded concurrency primitives, nonblocking TCP byte transport, incremental framing, and the typed JSON codec. Milestone 4A adds the multi-client TCP lifecycle; Milestone 4B integrates framing and typed requests per connection and registers devices by `ConnectionId`. Milestone 4C adds a bounded incoming command queue (default capacity 1,024), nonblocking admission, `SERVER_BUSY` on saturation, and an owned draining dispatcher. Milestone 5A adds the standalone, thread-safe `TelemetryStore` for bounded per-device/per-metric aggregates. Milestone 5B adds synchronous domain processing. Milestone 5C connects processing to protocol responses and propagates server receive metadata. Milestone 5D dispatches commands through a fixed WorkerPool and drains accepted work before server shutdown.
