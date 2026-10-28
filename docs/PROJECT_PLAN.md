@@ -303,6 +303,14 @@ Each future milestone requires explicit approval before work begins.
 - Verification guarantee: a passing hosted run demonstrates that this workflow passed for that commit on the `windows-2022` image. Local verification and workflow inspection do not establish that a GitHub-hosted run passed.
 - Known limitations: the workflow relies on GitHub's hosted Windows image and network access for the first `FetchContent` download; this milestone does not add dependency caching or an offline build path. The workflow is not verified on GitHub until it is pushed and a hosted run completes successfully.
 
+#### Milestone 6B-1 - Structured logger core (complete)
+
+- `telemetryhub_support` provides a standalone synchronous JSON Lines `Logger`. It borrows an `std::ostream`, is noncopyable/nonmovable, owns no thread, and has no production dependencies on the application, networking, concurrency, protocol, or domain libraries. The stream must outlive the logger, and logger destruction must not overlap calls to `log()`.
+- Records use the stable property order `timestamp`, `level`, `thread_id`, `event`, `fields`. Timestamps are UTC `YYYY-MM-DDTHH:MM:SS.mmmZ`, truncating sub-millisecond values. Event names are fixed snake_case mappings; `unknown_failure` means a genuinely unexpected failure with no more specific event. Invalid enum values are rejected, never remapped. The only field keys are `port`, `connection_id`, `request_id`, and `error_code`; values are signed/unsigned 64-bit integers or booleans. Empty fields are `{}`.
+- The logger accepts at most four unique fields and thread IDs up to 128 bytes; the complete JSON object is capped at 512 bytes (excluding newline). Caller-supplied strings and floating-point values are not supported. Names and field values are fixed ASCII; the internally formatted thread ID is ASCII with the classic locale. Defensive escaping uses standard JSON quote/backslash escapes and four-digit hexadecimal Unicode escapes for control or non-ASCII bytes. Arbitrary UTF-8 input is excluded by the narrow API. Integer conversion uses `std::to_chars` and is locale-independent.
+- Each record is fully formatted before output. Formatting/allocation failures drop that record and permit later attempts. A single mutex serializes each record write, newline, and flush. Every record is flushed. Stream-state failures and exceptions mark an atomic permanent output-failed state; later records are dropped. A stream can partially accept a record before failure, so serialization is guaranteed only for output attempted through one logger instance, not transactional or complete output. Logging is synchronous and a blocked stream blocks callers. Reentrant use of the same logger from its stream is unsupported; expressions used to construct arguments are evaluated before `log()` and are outside its `noexcept` guarantee.
+- Focused tests cover schema and mappings, validation and limits, exact fixed-time UTC boundaries including pre-epoch and year limits, concurrent emission, output failures, and formatting-failure recovery. This milestone adds no application call sites; application/network logging integration and destination selection remain in Milestone 6B-2.
+
 ## Deferred implementation choices
 
 These remain intentionally deferred until their implementing milestone:
@@ -310,4 +318,4 @@ These remain intentionally deferred until their implementing milestone:
 - Capacities outside the telemetry incoming and worker-task queues, and exact full-queue wait thresholds.
 - Receive-sequence generation and propagation through ingress, deferred to the response-processing milestone.
 - Socket timeouts and the exact slow-client disconnect threshold.
-- Logger output destination and formatting.
+- Logger production output destination and application/network integration, deferred to Milestone 6B-2.

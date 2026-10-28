@@ -16,6 +16,19 @@ target_compile_features(telemetryhub_project_options INTERFACE cxx_std_20)
 telemetryhub_set_project_warnings(telemetryhub_project_options)
 
 add_library(
+    telemetryhub_support
+    src/support/logger.cpp
+)
+target_include_directories(
+    telemetryhub_support
+    PUBLIC
+        ${PROJECT_SOURCE_DIR}/include
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(telemetryhub_support PUBLIC telemetryhub_project_options)
+
+add_library(
     telemetryhub_concurrency
     src/concurrency/worker_pool.cpp
 )

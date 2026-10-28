@@ -12,6 +12,25 @@ FetchContent_MakeAvailable(googletest)
 include(GoogleTest)
 
 add_executable(
+    telemetryhub_logger_tests
+    unit/logger_test.cpp
+)
+target_include_directories(
+    telemetryhub_logger_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/src
+)
+target_link_libraries(
+    telemetryhub_logger_tests
+    PRIVATE
+        telemetryhub_support
+        telemetryhub_project_options
+        GTest::gtest_main
+        nlohmann_json::nlohmann_json
+)
+gtest_discover_tests(telemetryhub_logger_tests PROPERTIES TIMEOUT 10)
+
+add_executable(
     telemetryhub_telemetry_store_tests
     unit/telemetry_store_test.cpp
 )
