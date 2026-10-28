@@ -11,9 +11,9 @@
 #include <chrono>
 #include <cstdint>
 #include <iterator>
-#include <latch>
 #include <limits>
 #include <ostream>
+#include <semaphore>
 #include <sstream>
 #include <streambuf>
 #include <stdexcept>
@@ -95,7 +95,7 @@ protected:
 class BlockingFailBuffer final : public std::streambuf
 {
 public:
-    BlockingFailBuffer(std::latch& entered, std::latch& release)
+    BlockingFailBuffer(std::binary_semaphore& entered, std::binary_semaphore& release)
         : entered_{entered},
           release_{release}
     {
@@ -104,14 +104,14 @@ public:
 protected:
     std::streamsize xsputn(const char*, const std::streamsize) override
     {
-        entered_.count_down();
-        release_.wait();
+        entered_.release();
+        release_.acquire();
         return 0;
     }
 
 private:
-    std::latch& entered_;
-    std::latch& release_;
+    std::binary_semaphore& entered_;
+    std::binary_semaphore& release_;
 };
 
 [[nodiscard]] std::string only_line(const std::string& text)
@@ -392,30 +392,58 @@ TEST(Logger, DetectsThrowingAndPartialWriteFailuresWithoutRetry)
 
 TEST(Logger, OutputFailureCanBeObservedConcurrently)
 {
-    std::latch write_entered{1};
-    std::latch allow_write_failure{1};
+    constexpr auto wait_timeout = 2s;
+    std::binary_semaphore write_entered{0};
+    std::binary_semaphore allow_write_failure{0};
     BlockingFailBuffer buffer{write_entered, allow_write_failure};
     std::ostream output{&buffer};
     Logger logger{output, LogLevel::debug};
     std::atomic<bool> observed_failure{false};
-    std::latch observer_started{1};
+    std::atomic<bool> stop_observer{false};
+    std::binary_semaphore observer_started{0};
+    std::binary_semaphore observer_done{0};
 
     std::jthread writer{[&] { logger.log(LogLevel::error, LogEvent::unknown_failure); }};
-    write_entered.wait();
+    const bool write_was_entered = write_entered.try_acquire_for(wait_timeout);
+    if (!write_was_entered)
+    {
+        allow_write_failure.release();
+        writer.join();
+        ADD_FAILURE() << "Logger did not enter the controlled stream write";
+        return;
+    }
+
     EXPECT_FALSE(logger.output_failed());
     std::jthread observer{[&] {
-        observer_started.count_down();
-        while (!logger.output_failed())
+        observer_started.release();
+        const auto deadline = steady_clock::now() + wait_timeout;
+        while (!logger.output_failed() &&
+               !stop_observer.load(std::memory_order_acquire) &&
+               steady_clock::now() < deadline)
         {
             std::this_thread::yield();
         }
-        observed_failure.store(true, std::memory_order_release);
+        observed_failure.store(logger.output_failed(), std::memory_order_release);
+        observer_done.release();
     }};
-    observer_started.wait();
-    allow_write_failure.count_down();
+    const bool observer_was_started = observer_started.try_acquire_for(wait_timeout);
+    if (!observer_was_started)
+    {
+        stop_observer.store(true, std::memory_order_release);
+    }
+
+    allow_write_failure.release();
     writer.join();
+    const bool observer_finished = observer_done.try_acquire_for(wait_timeout);
+    if (!observer_finished)
+    {
+        stop_observer.store(true, std::memory_order_release);
+        static_cast<void>(observer_done.try_acquire_for(wait_timeout));
+    }
     observer.join();
 
+    EXPECT_TRUE(observer_was_started);
+    EXPECT_TRUE(observer_finished);
     EXPECT_TRUE(observed_failure.load(std::memory_order_acquire));
 }
 

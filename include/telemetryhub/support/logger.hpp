@@ -51,7 +51,8 @@ class Logger
 {
 public:
     // Borrows output; it must outlive this Logger. The stream must not re-enter
-    // this Logger, and destruction must not overlap calls to log().
+    // this Logger, and destruction must not overlap any public operation,
+    // including log() and output_failed().
     explicit Logger(std::ostream& output, LogLevel minimum = LogLevel::info);
 
     Logger(const Logger&) = delete;
