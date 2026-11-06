@@ -12,6 +12,7 @@ The project demonstrates:
 - predictable shutdown with owned `std::jthread` instances;
 - focused GoogleTest unit tests and localhost integration tests;
 - strict MSVC warnings and a reproducible CMake workflow.
+- synchronous structured JSON Lines logging for application lifecycle and selected fatal network/dispatcher failures.
 
 ## Target environment
 
@@ -93,6 +94,14 @@ Local verification runs on the developer's machine and reports only that machine
 Milestones 0–3B provide the project foundation, bounded concurrency primitives, nonblocking TCP byte transport, incremental framing, and the typed JSON codec. Milestone 4A adds the multi-client TCP lifecycle; Milestone 4B integrates framing and typed requests per connection and registers devices by `ConnectionId`. Milestone 4C adds a bounded incoming command queue (default capacity 1,024), nonblocking admission, `SERVER_BUSY` on saturation, and an owned draining dispatcher. Milestone 5A adds the standalone, thread-safe `TelemetryStore` for bounded per-device/per-metric aggregates. Milestone 5B adds synchronous domain processing. Milestone 5C connects processing to protocol responses and propagates server receive metadata. Milestone 5D dispatches commands through a fixed WorkerPool and drains accepted work before server shutdown.
 
 Architecture, approved decisions, risks, and milestone exit criteria are recorded in [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md). Development proceeds one explicitly approved milestone at a time.
+
+## Structured logging
+
+`telemetry_server` owns one `telemetryhub::support::Logger` over `std::clog`. It writes JSON Lines records for application start, orderly stop, successful stop or shutdown error, startup failure, and unclassified runtime failure. The optional borrowed Logger pointer in `TcpServerConfig` and `CommandIngress` keeps direct construction without logging supported; the server passes the pointer to its sessions. The application keeps the logger and its stream alive until ingress draining, worker draining, and server/session joining are complete.
+
+Networking records only fatal unexpected accept/listener failures (`accept_failed`) and terminal unexpected session receive/send failures (`session_receive_failed`, `session_send_failed`). Graceful peer FIN, cancellation, poll timeouts, expected retry/reset/disconnect errors, and expected shutdown errors remain silent. CommandIngress records `command_dispatcher_failed` only at its fatal dispatcher exception boundary; individual command failures and `SERVER_BUSY` responses are not logged.
+
+Logging is synchronous and flushes each record. A blocked `std::clog` can therefore delay the rare thread that emits a record. Logger output failure is contained by Logger and does not change component shutdown. TCP tests verify optional Logger injection, successful startup, FIN cleanup, and absence of failure records on graceful closure. Application lifecycle placements and rare fatal accept, socket I/O, and dispatcher failure branches are reviewed in code; the test suite does not force nondeterministic Winsock failures or execute `main()` lifecycle records.
 
 ## Milestone 4A connection lifecycle
 

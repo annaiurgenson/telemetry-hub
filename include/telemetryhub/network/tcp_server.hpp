@@ -10,6 +10,8 @@
 #include <system_error>
 #include <vector>
 
+namespace telemetryhub::support { class Logger; }
+
 namespace telemetryhub::network {
 
 class ConnectionId
@@ -82,6 +84,7 @@ struct TcpServerConfig
     std::size_t max_outbound_buffer_size_bytes{default_max_outbound_buffer_size_bytes};
     std::chrono::milliseconds terminal_flush_timeout{default_terminal_flush_timeout};
     SessionCallbacksFactory session_callbacks_factory;
+    support::Logger* logger{nullptr};
 };
 
 class TcpServer

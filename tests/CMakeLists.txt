@@ -51,6 +51,7 @@ target_link_libraries(
     telemetryhub_command_ingress_tests
     PRIVATE
         telemetryhub_server
+        telemetryhub_support
         telemetryhub_project_options
         GTest::gtest_main
 )
@@ -189,6 +190,7 @@ target_link_libraries(
     telemetryhub_tcp_server_integration_tests
     PRIVATE
         telemetryhub_network
+        telemetryhub_support
         telemetryhub_project_options
         GTest::gtest_main
 )

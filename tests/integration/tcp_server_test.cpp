@@ -1,6 +1,7 @@
 #include <telemetryhub/network/tcp_server.hpp>
 #include <telemetryhub/network/tcp.hpp>
 #include <telemetryhub/network/winsock_error.hpp>
+#include <telemetryhub/support/logger.hpp>
 
 #include <gtest/gtest.h>
 
@@ -10,8 +11,9 @@
 #include <cstdint>
 #include <future>
 #include <latch>
-#include <thread>
+#include <sstream>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -97,6 +99,25 @@ TEST(TcpServer, StartsOnEphemeralPortAndStopsIdempotently)
     server.shutdown();
     server.shutdown();
     EXPECT_FALSE(server.is_running());
+}
+
+TEST(TcpServer, OptionalLoggerAllowsNormalConnectionAndGracefulClose)
+{
+    std::ostringstream output;
+    telemetryhub::support::Logger logger{output};
+    TcpServerConfig config;
+    config.logger = &logger;
+    TcpServer server{std::move(config)};
+    server.start();
+
+    Socket client = connect_client(server);
+    ASSERT_TRUE(wait_for_count(server, 1U));
+    EXPECT_FALSE(client.close());
+    ASSERT_TRUE(wait_for_count(server, 0U));
+    server.shutdown();
+
+    EXPECT_FALSE(logger.output_failed());
+    EXPECT_TRUE(output.str().empty());
 }
 
 TEST(TcpServer, AcceptsSeveralClientsWithUniqueServerGeneratedIds)

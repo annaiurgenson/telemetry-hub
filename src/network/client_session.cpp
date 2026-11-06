@@ -2,6 +2,9 @@
 
 #include <telemetryhub/network/tcp.hpp>
 #include <telemetryhub/network/winsock_error.hpp>
+#include <telemetryhub/support/logger.hpp>
+
+#include <winsock2.h>
 
 #include <array>
 #include <utility>
@@ -11,6 +14,13 @@ namespace {
 
 constexpr std::size_t receive_buffer_size = 4096U;
 
+[[nodiscard]] bool expected_connection_error(const int error) noexcept
+{
+    return error == WSAEWOULDBLOCK || error == WSAECONNRESET ||
+           error == WSAECONNABORTED || error == WSAENETRESET ||
+           error == WSAENOTCONN || error == WSAESHUTDOWN;
+}
+
 } // namespace
 
 ClientSession::ClientSession(
@@ -19,12 +29,14 @@ ClientSession::ClientSession(
     const std::size_t outbound_capacity,
     const std::size_t max_outbound_buffer_size_bytes,
     const std::chrono::milliseconds terminal_flush_timeout,
-    SessionCallbacks callbacks)
+    SessionCallbacks callbacks,
+    support::Logger* logger)
     : id_{id},
       socket_{std::move(socket)},
       max_outbound_buffer_size_bytes_{max_outbound_buffer_size_bytes},
       terminal_flush_timeout_{terminal_flush_timeout},
       callbacks_{std::move(callbacks)},
+      logger_{logger},
       outbound_{outbound_capacity}
 {
 }
@@ -205,6 +217,18 @@ void ClientSession::reader_loop(const std::stop_token stop_token) noexcept
             const ReceiveResult result = receive_some(socket_, buffer, stop_token);
             if (result.status != ReceiveStatus::data)
             {
+                const int error = result.error.value();
+                if (result.status == ReceiveStatus::error && !stop_token.stop_requested() &&
+                    error != 0 && !expected_connection_error(error) && logger_ != nullptr)
+                {
+                    const auto connection_id = static_cast<std::uint64_t>(id_.value());
+                    const auto error_code = static_cast<std::int64_t>(error);
+                    logger_->log(
+                        support::LogLevel::warning,
+                        support::LogEvent::session_receive_failed,
+                        {{support::LogFieldKey::connection_id, connection_id},
+                         {support::LogFieldKey::error_code, error_code}});
+                }
                 break;
             }
             if (callbacks_.on_bytes)
@@ -247,6 +271,18 @@ void ClientSession::writer_loop(const std::stop_token stop_token) noexcept
                 socket_, *item.value, stop_token, std::nullopt, &flush_deadline_ticks_);
             if (result.error || result.cancelled || result.timed_out)
             {
+                const int error = result.error.value();
+                if (result.error && !stop_token.stop_requested() &&
+                    !expected_connection_error(error) && logger_ != nullptr)
+                {
+                    const auto connection_id = static_cast<std::uint64_t>(id_.value());
+                    const auto error_code = static_cast<std::int64_t>(error);
+                    logger_->log(
+                        support::LogLevel::warning,
+                        support::LogEvent::session_send_failed,
+                        {{support::LogFieldKey::connection_id, connection_id},
+                         {support::LogFieldKey::error_code, error_code}});
+                }
                 break;
             }
         }

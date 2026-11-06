@@ -14,6 +14,8 @@
 #include <thread>
 #include <vector>
 
+namespace telemetryhub::support { class Logger; }
+
 namespace telemetryhub::server {
 
 inline constexpr std::size_t default_incoming_command_queue_capacity = 1'024U;
@@ -37,7 +39,8 @@ public:
     explicit CommandIngress(
         domain::TelemetryProcessor& processor,
         concurrency::WorkerPool& worker_pool,
-        std::size_t capacity = default_incoming_command_queue_capacity);
+        std::size_t capacity = default_incoming_command_queue_capacity,
+        support::Logger* logger = nullptr);
     ~CommandIngress() noexcept;
 
     CommandIngress(const CommandIngress&) = delete;
@@ -71,6 +74,7 @@ private:
 
     domain::TelemetryProcessor& processor_;
     concurrency::WorkerPool& worker_pool_;
+    support::Logger* logger_;
     concurrency::BoundedBlockingQueue<CommandEnvelope> commands_;
     std::atomic<domain::ReceiveSequence> last_receive_sequence_{0U};
     std::mutex lifecycle_mutex_;

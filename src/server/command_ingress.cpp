@@ -4,6 +4,7 @@
 #include <telemetryhub/protocol/message_codec.hpp>
 #include <telemetryhub/protocol/message_framer.hpp>
 #include <telemetryhub/server/processing_response.hpp>
+#include <telemetryhub/support/logger.hpp>
 
 #include <limits>
 #include <memory>
@@ -34,9 +35,11 @@ namespace {
 CommandIngress::CommandIngress(
     domain::TelemetryProcessor& processor,
     concurrency::WorkerPool& worker_pool,
-    const std::size_t capacity)
+    const std::size_t capacity,
+    support::Logger* logger)
     : processor_{processor},
       worker_pool_{worker_pool},
+      logger_{logger},
       commands_{capacity}
 {
 }
@@ -162,7 +165,12 @@ void CommandIngress::consume(const ResponseSink& response_sink) noexcept
     }
     catch (...)
     {
-        // No exception may escape the owned dispatcher thread.
+        if (logger_ != nullptr)
+        {
+            logger_->log(
+                support::LogLevel::error,
+                support::LogEvent::command_dispatcher_failed);
+        }
     }
 }
 

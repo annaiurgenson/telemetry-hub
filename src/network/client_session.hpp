@@ -27,7 +27,8 @@ public:
         std::size_t outbound_capacity,
         std::size_t max_outbound_buffer_size_bytes,
         std::chrono::milliseconds terminal_flush_timeout,
-        SessionCallbacks callbacks);
+        SessionCallbacks callbacks,
+        support::Logger* logger);
     ~ClientSession() noexcept;
 
     ClientSession(const ClientSession&) = delete;
@@ -56,6 +57,7 @@ private:
     const std::size_t max_outbound_buffer_size_bytes_;
     const std::chrono::milliseconds terminal_flush_timeout_;
     SessionCallbacks callbacks_;
+    support::Logger* logger_;
     concurrency::BoundedBlockingQueue<std::vector<std::byte>> outbound_;
     std::stop_source stop_source_;
     std::jthread reader_;

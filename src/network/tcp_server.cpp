@@ -5,6 +5,7 @@
 #include <telemetryhub/network/tcp.hpp>
 #include <telemetryhub/network/winsock_runtime.hpp>
 #include <telemetryhub/network/winsock_error.hpp>
+#include <telemetryhub/support/logger.hpp>
 
 #include <atomic>
 #include <condition_variable>
@@ -16,6 +17,15 @@
 #include <utility>
 
 namespace telemetryhub::network {
+namespace {
+
+[[nodiscard]] bool expected_accept_error(const int error) noexcept
+{
+    return error == WSAEWOULDBLOCK || error == WSAEINTR ||
+           error == WSAECONNABORTED || error == WSAECONNRESET;
+}
+
+} // namespace
 
 class TcpServer::Impl
 {
@@ -80,6 +90,12 @@ public:
                 catch (...)
                 {
                     running_.store(false);
+                    if (!token.stop_requested() && config_.logger != nullptr)
+                    {
+                        config_.logger->log(
+                            support::LogLevel::error,
+                            support::LogEvent::accept_failed);
+                    }
                 }
             }};
             {
@@ -91,6 +107,11 @@ public:
         catch (...)
         {
             running_.store(false);
+            if (accept_thread_.joinable())
+            {
+                accept_thread_.request_stop();
+                accept_thread_.join();
+            }
             static_cast<void>(listener_.close());
             throw;
         }
@@ -322,6 +343,16 @@ private:
             }
             if (ready.status == SocketWaitStatus::error)
             {
+                const int error = ready.error.value();
+                if (!stop_token.stop_requested() && error != WSAENOTSOCK &&
+                    !expected_accept_error(error) && config_.logger != nullptr)
+                {
+                    const auto error_code = static_cast<std::int64_t>(error);
+                    config_.logger->log(
+                        support::LogLevel::error,
+                        support::LogEvent::accept_failed,
+                        {{support::LogFieldKey::error_code, error_code}});
+                }
                 break;
             }
 
@@ -333,14 +364,21 @@ private:
             catch (const std::system_error& error)
             {
                 const int code = error.code().value();
-                if (code == WSAEWOULDBLOCK || code == WSAEINTR ||
-                    code == WSAECONNABORTED || code == WSAECONNRESET)
+                if (expected_accept_error(code))
                 {
                     continue;
                 }
                 if (stop_token.stop_requested() || code == WSAENOTSOCK)
                 {
                     break;
+                }
+                if (config_.logger != nullptr)
+                {
+                    const auto error_code = static_cast<std::int64_t>(code);
+                    config_.logger->log(
+                        support::LogLevel::error,
+                        support::LogEvent::accept_failed,
+                        {{support::LogFieldKey::error_code, error_code}});
                 }
                 break;
             }
@@ -388,7 +426,7 @@ private:
             auto session = std::make_shared<ClientSession>(
                 ConnectionId{id_value}, std::move(accepted), config_.outbound_queue_capacity,
                 config_.max_outbound_buffer_size_bytes, config_.terminal_flush_timeout,
-                std::move(callbacks));
+                std::move(callbacks), config_.logger);
             session->start();
             {
                 std::lock_guard registry_lock{registry_mutex_};

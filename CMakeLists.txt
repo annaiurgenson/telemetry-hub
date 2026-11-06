@@ -58,6 +58,7 @@ target_link_libraries(
     PUBLIC
         telemetryhub_project_options
     PRIVATE
+        telemetryhub_support
         ws2_32
 )
 
@@ -119,10 +120,12 @@ target_link_libraries(
         telemetryhub_domain
         telemetryhub_concurrency
         telemetryhub_project_options
+    PRIVATE
+        telemetryhub_support
 )
 
 add_executable(telemetry_server apps/telemetry_server/main.cpp)
-target_link_libraries(telemetry_server PRIVATE telemetryhub_server)
+target_link_libraries(telemetry_server PRIVATE telemetryhub_server telemetryhub_support)
 
 add_executable(device_simulator apps/device_simulator/main.cpp)
 target_link_libraries(device_simulator PRIVATE telemetryhub_project_options)
