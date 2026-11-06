@@ -81,6 +81,7 @@ public:
 
         try
         {
+            std::unique_lock enqueue_lock{enqueue_mutex_};
             running_.store(true);
             accept_thread_ = std::jthread{[this](const std::stop_token token) {
                 try
@@ -94,14 +95,11 @@ public:
                     {
                         config_.logger->log(
                             support::LogLevel::error,
-                            support::LogEvent::accept_failed);
+                            support::LogEvent::unknown_failure);
                     }
                 }
             }};
-            {
-                std::lock_guard enqueue_lock{enqueue_mutex_};
-                accepting_enqueues_ = true;
-            }
+            accepting_enqueues_ = true;
             started_ = true;
         }
         catch (...)
