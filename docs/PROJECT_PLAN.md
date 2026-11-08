@@ -319,6 +319,13 @@ Each future milestone requires explicit approval before work begins.
 - CommandIngress logs one error-level `command_dispatcher_failed` from its fatal dispatcher exception boundary. Individual command-processing failures and `SERVER_BUSY` responses are not logged. No Logger calls run under component locks or from destructors; synchronous Logger output can block the rare emitting thread, while Logger contains output failures without altering cleanup.
 - Normal TCP integration coverage verifies direct construction without Logger remains intact, injected Logger startup/connection/FIN/shutdown behavior, and no failure records on graceful closure. Existing TCP and ingress tests continue to cover session lifecycle, concurrent shutdown, response routing, and draining. Rare fatal Winsock and dispatcher branches are reviewed but not forced by generalized fault injection; localhost resets are not asserted to produce particular errors or records. Full suite/repeated regression results are recorded per implementation run; application lifecycle logging is placement-reviewed rather than subprocess-tested.
 
+#### Milestone 6C - Minimal Runtime Configuration (complete)
+
+- `telemetry_server` accepts `--port` in the range 0..65535, `--max-connections` in the range 1..`INT_MAX`, and standalone `--help`. With no overrides it retains `TcpServerConfig` defaults, including port 0 for an OS-selected ephemeral loopback port and 64 maximum active connections. Unknown, duplicate, malformed, missing, or out-of-range arguments are diagnosed to stderr and return 2; help returns 0 without starting the server. Application failure remains exit code 1.
+- The small application-private parser uses `std::from_chars`, performs no output, and returns only explicitly supplied overrides. `main()` handles diagnostics/help and applies overrides to the existing `TcpServerConfig`; networking, WorkerPool, and Logger APIs are unchanged. Parsing and range validation happen before application composition starts worker or network threads.
+- Parser unit tests cover defaults, explicit overrides, boundaries, malformed and out-of-range values, duplicates, unknown arguments, and help. Minimal CTest executable smoke tests verify standalone help and an invalid port exit without starting the server. Existing server, ingress, worker-pool, protocol-session, and logger suites cover regressions in the unchanged architecture.
+- Exit: all default tests pass under the strict Windows MSVC preset, focused regression tests pass, and `git diff --check` is clean.
+
 ## Deferred implementation choices
 
 These remain intentionally deferred until their implementing milestone:

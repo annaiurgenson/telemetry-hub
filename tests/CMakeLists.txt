@@ -31,6 +31,50 @@ target_link_libraries(
 gtest_discover_tests(telemetryhub_logger_tests PROPERTIES TIMEOUT 10)
 
 add_executable(
+    telemetryhub_telemetry_server_cli_tests
+    unit/telemetry_server_cli_test.cpp
+    ${PROJECT_SOURCE_DIR}/apps/telemetry_server/command_line.cpp
+)
+target_include_directories(
+    telemetryhub_telemetry_server_cli_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/apps/telemetry_server
+)
+target_link_libraries(
+    telemetryhub_telemetry_server_cli_tests
+    PRIVATE
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(
+    telemetryhub_telemetry_server_cli_tests
+    PROPERTIES
+        TIMEOUT 10
+)
+
+add_test(
+    NAME TelemetryServerCliExecutable.Help
+    COMMAND
+        ${CMAKE_COMMAND}
+        -DTELEMETRY_SERVER=$<TARGET_FILE:telemetry_server>
+        -DTEST_MODE=help
+        -P ${PROJECT_SOURCE_DIR}/tests/cmake/telemetry_server_cli_smoke.cmake
+)
+add_test(
+    NAME TelemetryServerCliExecutable.InvalidArgument
+    COMMAND
+        ${CMAKE_COMMAND}
+        -DTELEMETRY_SERVER=$<TARGET_FILE:telemetry_server>
+        -DTEST_MODE=invalid
+        -P ${PROJECT_SOURCE_DIR}/tests/cmake/telemetry_server_cli_smoke.cmake
+)
+set_tests_properties(
+    TelemetryServerCliExecutable.Help
+    TelemetryServerCliExecutable.InvalidArgument
+    PROPERTIES TIMEOUT 10
+)
+
+add_executable(
     telemetryhub_telemetry_store_tests
     unit/telemetry_store_test.cpp
 )

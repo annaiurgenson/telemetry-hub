@@ -124,7 +124,11 @@ target_link_libraries(
         telemetryhub_support
 )
 
-add_executable(telemetry_server apps/telemetry_server/main.cpp)
+add_executable(
+    telemetry_server
+    apps/telemetry_server/main.cpp
+    apps/telemetry_server/command_line.cpp
+)
 target_link_libraries(telemetry_server PRIVATE telemetryhub_server telemetryhub_support)
 
 add_executable(device_simulator apps/device_simulator/main.cpp)

@@ -1,3 +1,5 @@
+#include "command_line.hpp"
+
 #include <telemetryhub/concurrency/worker_pool.hpp>
 #include <telemetryhub/domain/telemetry_processor.hpp>
 #include <telemetryhub/domain/telemetry_store.hpp>
@@ -20,7 +22,7 @@ using telemetryhub::support::LogFieldKey;
 using telemetryhub::support::LogLevel;
 using telemetryhub::support::Logger;
 
-int run_server(Logger& logger)
+int run_server(Logger& logger, const telemetry_server::ConfigurationOverrides& overrides)
 {
     telemetryhub::domain::TelemetryStore store;
     telemetryhub::domain::TelemetryProcessor processor{store};
@@ -65,6 +67,14 @@ int run_server(Logger& logger)
         handler = std::make_shared<telemetryhub::server::ProtocolSessionHandler>(registrations, ingress);
 
         telemetryhub::network::TcpServerConfig config;
+        if (overrides.port.has_value())
+        {
+            config.port = *overrides.port;
+        }
+        if (overrides.max_connections.has_value())
+        {
+            config.max_connections = *overrides.max_connections;
+        }
         config.logger = &logger;
         config.session_callbacks_factory = [handler](const telemetryhub::network::ConnectionId id) {
             return handler->callbacks_for(id);
@@ -123,8 +133,26 @@ int run_server(Logger& logger)
 
 } // namespace
 
-int main()
+int main(const int argc, char* argv[])
 {
+    const telemetry_server::ParseResult parsed =
+        telemetry_server::parse_command_line(argc, argv);
+    if (parsed.status == telemetry_server::ParseStatus::help)
+    {
+        std::cout << telemetry_server::usage_text();
+        return 0;
+    }
+    if (parsed.status == telemetry_server::ParseStatus::error)
+    {
+        std::cerr << "telemetry_server: " << parsed.diagnostic;
+        if (!parsed.argument.empty())
+        {
+            std::cerr << ": " << parsed.argument;
+        }
+        std::cerr << '\n' << telemetry_server::usage_text();
+        return 2;
+    }
+
     Logger logger{std::clog};
-    return run_server(logger);
+    return run_server(logger, parsed.overrides);
 }

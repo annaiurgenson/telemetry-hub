@@ -103,6 +103,12 @@ Networking records only fatal unexpected accept/listener failures (`accept_faile
 
 Logging is synchronous and flushes each record. A blocked `std::clog` can therefore delay the rare thread that emits a record. Logger output failure is contained by Logger and does not change component shutdown. TCP tests verify optional Logger injection, successful startup, FIN cleanup, and absence of failure records on graceful closure. Application lifecycle placements and rare fatal accept, socket I/O, and dispatcher failure branches are reviewed in code; the test suite does not force nondeterministic Winsock failures or execute `main()` lifecycle records.
 
+## Server runtime options
+
+With no arguments, `telemetry_server` keeps the existing defaults: port `0` (the operating system selects an ephemeral loopback port) and 64 maximum active connections. Use `--port <number>` for a port from 0 through 65535 and `--max-connections <number>` for a limit from 1 through `INT_MAX`. `--help` must be used alone and prints usage without starting the server. Invalid or duplicate arguments return exit code 2; successful help or orderly shutdown returns 0; application startup or shutdown failure returns 1.
+
+For example: `telemetry_server --port 5000 --max-connections 32`. CLI parsing is application-local and applies only explicitly provided overrides to `TcpServerConfig`; the networking defaults remain the single source of truth.
+
 ## Milestone 4A connection lifecycle
 
 `TcpServer` owns its `WinsockRuntime`, nonblocking loopback listener, accept thread, and connection registry. Each registered `ClientSession` owns its accepted socket and bounded outbound queue. Its reader and writer borrow that socket; the writer is the only sender. The accept thread reaps completed sessions after removing them from the registry lock, and joins both I/O threads before releasing the session socket.
