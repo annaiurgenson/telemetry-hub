@@ -52,6 +52,51 @@ gtest_discover_tests(
         TIMEOUT 10
 )
 
+add_executable(
+    telemetryhub_device_simulator_cli_tests
+    unit/device_simulator_cli_test.cpp
+    ${PROJECT_SOURCE_DIR}/apps/device_simulator/command_line.cpp
+)
+target_include_directories(
+    telemetryhub_device_simulator_cli_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/apps/device_simulator
+)
+target_link_libraries(
+    telemetryhub_device_simulator_cli_tests
+    PRIVATE
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(
+    telemetryhub_device_simulator_cli_tests
+    PROPERTIES
+        TIMEOUT 10
+)
+
+add_executable(
+    telemetryhub_device_simulator_integration_tests
+    integration/device_simulator_test.cpp
+    ${PROJECT_SOURCE_DIR}/apps/device_simulator/demo_client.cpp
+)
+target_include_directories(
+    telemetryhub_device_simulator_integration_tests
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/apps/device_simulator
+)
+target_link_libraries(
+    telemetryhub_device_simulator_integration_tests
+    PRIVATE
+        telemetryhub_server
+        telemetryhub_project_options
+        GTest::gtest_main
+)
+gtest_discover_tests(
+    telemetryhub_device_simulator_integration_tests
+    PROPERTIES
+        TIMEOUT 15
+)
+
 add_test(
     NAME TelemetryServerCliExecutable.Help
     COMMAND

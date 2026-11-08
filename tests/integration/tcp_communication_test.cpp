@@ -28,10 +28,12 @@ using telemetryhub::network::WinsockRuntime;
 using telemetryhub::network::accept;
 using telemetryhub::network::bind_loopback;
 using telemetryhub::network::connect_loopback;
+using telemetryhub::network::connect_loopback_until;
 using telemetryhub::network::create_ipv4_tcp_socket;
 using telemetryhub::network::listen;
 using telemetryhub::network::local_port;
 using telemetryhub::network::receive_some;
+using telemetryhub::network::receive_some_until;
 using telemetryhub::network::send_all;
 
 constexpr std::array ping{
@@ -92,6 +94,50 @@ TEST_F(TcpCommunicationTest, EstablishesLoopbackClientAndServerSockets)
 
     EXPECT_TRUE(sockets.client.valid());
     EXPECT_TRUE(sockets.server.valid());
+}
+
+TEST_F(TcpCommunicationTest, ReceiveSomeUntilTimesOutWhenPeerIsSilent)
+{
+    ConnectedSockets sockets = make_connected_sockets();
+    std::array<std::byte, 16U> buffer{};
+
+    const auto result = receive_some_until(
+        sockets.client, buffer, {}, std::chrono::steady_clock::now() + std::chrono::milliseconds{50});
+
+    EXPECT_EQ(result.status, ReceiveStatus::timed_out);
+    EXPECT_EQ(result.bytes_transferred, 0U);
+}
+
+TEST_F(TcpCommunicationTest, ConnectLoopbackUntilReportsConnectionFailure)
+{
+    Socket reservation = create_ipv4_tcp_socket();
+    bind_loopback(reservation, 0U);
+    const std::uint16_t port = local_port(reservation);
+    ASSERT_FALSE(reservation.close());
+
+    Socket client = create_ipv4_tcp_socket();
+    ASSERT_FALSE(client.set_nonblocking(true));
+    try
+    {
+        connect_loopback_until(
+            client, port, std::chrono::steady_clock::now() + std::chrono::milliseconds{150});
+        FAIL() << "Expected a bounded connection failure";
+    }
+    catch (const std::system_error& error)
+    {
+        EXPECT_TRUE(
+            error.code().value() == WSAECONNREFUSED || error.code().value() == WSAETIMEDOUT);
+    }
+}
+
+TEST_F(TcpCommunicationTest, ConnectLoopbackUntilHonorsAnExpiredDeadline)
+{
+    Socket client = create_ipv4_tcp_socket();
+    ASSERT_FALSE(client.set_nonblocking(true));
+
+    EXPECT_THROW(
+        connect_loopback_until(client, 5000U, std::chrono::steady_clock::now()),
+        std::system_error);
 }
 
 TEST_F(TcpCommunicationTest, ExchangesRawPingAndPongBytes)

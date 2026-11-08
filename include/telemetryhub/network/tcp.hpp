@@ -26,7 +26,8 @@ enum class ReceiveStatus
     data,
     peer_closed,
     cancelled,
-    error
+    error,
+    timed_out
 };
 
 struct ReceiveResult
@@ -64,6 +65,11 @@ void bind_loopback(const Socket& socket, std::uint16_t port);
 void listen(const Socket& socket, int backlog = 1);
 [[nodiscard]] Socket accept(const Socket& listener);
 void connect_loopback(const Socket& socket, std::uint16_t port);
+// The socket must be nonblocking. Throws WSAETIMEDOUT when the deadline expires.
+void connect_loopback_until(
+    const Socket& socket,
+    std::uint16_t port,
+    std::chrono::steady_clock::time_point deadline);
 
 // The socket must be nonblocking. One finite WSAPoll wait; peer-close
 // readiness is returned as ready for reads so recv can distinguish EOF/reset.
@@ -87,5 +93,13 @@ void connect_loopback(const Socket& socket, std::uint16_t port);
     const Socket& socket,
     std::span<std::byte> buffer,
     std::stop_token stop_token) noexcept;
+
+// Returns timed_out when no bytes become available before the absolute deadline.
+// Reuse the same deadline across calls when receiving one complete frame.
+[[nodiscard]] ReceiveResult receive_some_until(
+    const Socket& socket,
+    std::span<std::byte> buffer,
+    std::stop_token stop_token,
+    std::chrono::steady_clock::time_point deadline) noexcept;
 
 } // namespace telemetryhub::network

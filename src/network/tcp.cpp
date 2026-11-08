@@ -35,6 +35,12 @@ namespace {
     return address;
 }
 
+[[nodiscard]] ReceiveResult receive_some_impl(
+    const Socket& socket,
+    std::span<std::byte> buffer,
+    std::stop_token stop_token,
+    std::optional<std::chrono::steady_clock::time_point> deadline) noexcept;
+
 } // namespace
 
 Socket create_ipv4_tcp_socket()
@@ -100,6 +106,79 @@ void connect_loopback(const Socket& socket, const std::uint16_t port)
             static_cast<int>(sizeof(address))) == SOCKET_ERROR)
     {
         throw_last_winsock_error("Failed to connect to IPv4 loopback listener");
+    }
+}
+
+void connect_loopback_until(
+    const Socket& socket,
+    const std::uint16_t port,
+    const std::chrono::steady_clock::time_point deadline)
+{
+    if (std::chrono::steady_clock::now() >= deadline)
+    {
+        throw std::system_error{
+            make_winsock_error_code(WSAETIMEDOUT), "Timed out connecting to IPv4 loopback listener"};
+    }
+
+    const sockaddr_in address = loopback_address(port);
+    if (connect(
+            socket.native_handle(),
+            reinterpret_cast<const sockaddr*>(&address),
+            static_cast<int>(sizeof(address))) != SOCKET_ERROR)
+    {
+        return;
+    }
+
+    const int connect_error = WSAGetLastError();
+    if (connect_error != WSAEWOULDBLOCK && connect_error != WSAEINPROGRESS &&
+        connect_error != WSAEALREADY)
+    {
+        throw std::system_error{
+            make_winsock_error_code(connect_error), "Failed to connect to IPv4 loopback listener"};
+    }
+
+    for (;;)
+    {
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= deadline)
+        {
+            throw std::system_error{
+                make_winsock_error_code(WSAETIMEDOUT),
+                "Timed out connecting to IPv4 loopback listener"};
+        }
+        const auto remaining = std::chrono::ceil<std::chrono::milliseconds>(deadline - now);
+        const auto wait_timeout = (std::min)(default_socket_poll_interval, remaining);
+        const SocketWaitResult wait = wait_for_socket(
+            socket, SocketWaitInterest::write, {}, wait_timeout);
+        if (wait.status == SocketWaitStatus::timeout)
+        {
+            continue;
+        }
+        if (std::chrono::steady_clock::now() >= deadline)
+        {
+            throw std::system_error{
+                make_winsock_error_code(WSAETIMEDOUT),
+                "Timed out connecting to IPv4 loopback listener"};
+        }
+
+        int socket_error = 0;
+        int socket_error_size = static_cast<int>(sizeof(socket_error));
+        if (getsockopt(
+                socket.native_handle(), SOL_SOCKET, SO_ERROR,
+                reinterpret_cast<char*>(&socket_error), &socket_error_size) == SOCKET_ERROR)
+        {
+            throw_last_winsock_error("Failed to retrieve loopback connection status");
+        }
+        if (socket_error != 0)
+        {
+            throw std::system_error{
+                make_winsock_error_code(socket_error), "Failed to connect to IPv4 loopback listener"};
+        }
+        if (wait.status == SocketWaitStatus::error)
+        {
+            throw std::system_error{wait.error, "Failed while waiting for loopback connection"};
+        }
+        return;
     }
 }
 
@@ -254,6 +333,26 @@ ReceiveResult receive_some(
     const std::span<std::byte> buffer,
     const std::stop_token stop_token) noexcept
 {
+    return receive_some_impl(socket, buffer, stop_token, std::nullopt);
+}
+
+ReceiveResult receive_some_until(
+    const Socket& socket,
+    const std::span<std::byte> buffer,
+    const std::stop_token stop_token,
+    const std::chrono::steady_clock::time_point deadline) noexcept
+{
+    return receive_some_impl(socket, buffer, stop_token, deadline);
+}
+
+namespace {
+
+ReceiveResult receive_some_impl(
+    const Socket& socket,
+    const std::span<std::byte> buffer,
+    const std::stop_token stop_token,
+    const std::optional<std::chrono::steady_clock::time_point> deadline) noexcept
+{
     if (buffer.empty())
     {
         return {ReceiveStatus::error, 0U, make_winsock_error_code(WSAEINVAL)};
@@ -266,19 +365,39 @@ ReceiveResult receive_some(
             return {ReceiveStatus::cancelled, 0U, {}};
         }
 
+        auto wait_timeout = default_socket_poll_interval;
+        if (deadline.has_value())
+        {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= *deadline)
+            {
+                return {ReceiveStatus::timed_out, 0U, {}};
+            }
+            wait_timeout = (std::min)(
+                wait_timeout, std::chrono::ceil<std::chrono::milliseconds>(*deadline - now));
+        }
+
         const SocketWaitResult wait =
-            wait_for_socket(socket, SocketWaitInterest::read, stop_token);
+            wait_for_socket(socket, SocketWaitInterest::read, stop_token, wait_timeout);
         if (wait.status == SocketWaitStatus::cancelled)
         {
             return {ReceiveStatus::cancelled, 0U, {}};
         }
         if (wait.status == SocketWaitStatus::timeout)
         {
+            if (deadline.has_value() && std::chrono::steady_clock::now() >= *deadline)
+            {
+                return {ReceiveStatus::timed_out, 0U, {}};
+            }
             continue;
         }
         if (wait.status == SocketWaitStatus::error)
         {
             return {ReceiveStatus::error, 0U, wait.error};
+        }
+        if (deadline.has_value() && std::chrono::steady_clock::now() >= *deadline)
+        {
+            return {ReceiveStatus::timed_out, 0U, {}};
         }
 
         const int received = recv(
@@ -302,5 +421,7 @@ ReceiveResult receive_some(
         return {ReceiveStatus::data, static_cast<std::size_t>(received), {}};
     }
 }
+
+} // namespace
 
 } // namespace telemetryhub::network

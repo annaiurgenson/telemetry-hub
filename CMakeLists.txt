@@ -131,8 +131,19 @@ add_executable(
 )
 target_link_libraries(telemetry_server PRIVATE telemetryhub_server telemetryhub_support)
 
-add_executable(device_simulator apps/device_simulator/main.cpp)
-target_link_libraries(device_simulator PRIVATE telemetryhub_project_options)
+add_executable(
+    device_simulator
+    apps/device_simulator/main.cpp
+    apps/device_simulator/command_line.cpp
+    apps/device_simulator/demo_client.cpp
+)
+target_link_libraries(
+    device_simulator
+    PRIVATE
+        telemetryhub_network
+        telemetryhub_protocol
+        telemetryhub_project_options
+)
 
 if(BUILD_TESTING)
     add_subdirectory(tests)

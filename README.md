@@ -109,6 +109,22 @@ With no arguments, `telemetry_server` keeps the existing defaults: port `0` (the
 
 For example: `telemetry_server --port 5000 --max-connections 32`. CLI parsing is application-local and applies only explicitly provided overrides to `TcpServerConfig`; the networking defaults remain the single source of truth.
 
+## Minimal device demonstration
+
+After building with the Windows MSVC preset, open two PowerShell terminals from the repository root. In the first, start the server on a known loopback port:
+
+```powershell
+.\build\windows-msvc\Debug\telemetry_server.exe --port 5000
+```
+
+In the second, run the fixed single-device scenario:
+
+```powershell
+.\build\windows-msvc\Debug\device_simulator.exe --port 5000
+```
+
+The simulator registers `demo-sensor-1`, submits temperature readings 21.5, 22.0, and 23.5 one at a time, then prints the server's statistics response. When it finishes, press Enter in the server terminal to stop the server cleanly. The client reports connection, timeout, protocol, and server errors and exits with a nonzero status on failure.
+
 ## Milestone 4A connection lifecycle
 
 `TcpServer` owns its `WinsockRuntime`, nonblocking loopback listener, accept thread, and connection registry. Each registered `ClientSession` owns its accepted socket and bounded outbound queue. Its reader and writer borrow that socket; the writer is the only sender. The accept thread reaps completed sessions after removing them from the registry lock, and joins both I/O threads before releasing the session socket.

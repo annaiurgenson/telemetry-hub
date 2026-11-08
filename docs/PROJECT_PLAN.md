@@ -326,6 +326,13 @@ Each future milestone requires explicit approval before work begins.
 - Parser unit tests cover defaults, explicit overrides, boundaries, malformed and out-of-range values, duplicates, unknown arguments, and help. Minimal CTest executable smoke tests verify standalone help and an invalid port exit without starting the server. Existing server, ingress, worker-pool, protocol-session, and logger suites cover regressions in the unchanged architecture.
 - Exit: all default tests pass under the strict Windows MSVC preset, focused regression tests pass, and `git diff --check` is clean.
 
+#### Milestone 6D - Minimal Device Simulator / Working Demo (complete)
+
+- `device_simulator --port <1..65535>` connects only to IPv4 loopback; standalone `--help` prints usage. The synchronous client registers `demo-sensor-1`, submits temperature values 21.5, 22.0, and 23.5, then requests and prints the server's count, minimum, maximum, mean, last value, and receive timestamp. It sends one request at a time and validates each response's request ID and expected typed result before continuing.
+- The client owns `WinsockRuntime` before its RAII socket, so reverse destruction closes the socket before Winsock cleanup. Connection, send, and complete response receive operations use fixed deadlines; the same response deadline covers all fragments of one framed response. Existing networking overloads retain their previous behavior.
+- Focused tests cover CLI boundaries/errors/help, silent-peer receive timeout, connection failure and expired connect deadline, and one in-process end-to-end simulator scenario. Existing protocol framing, typed codec, server, ingress, and worker-pool behavior are reused unchanged.
+- The Windows MSVC preset produces `telemetry_server.exe` and `device_simulator.exe` under `build/windows-msvc/Debug`; README documents running them in two terminals. Strict MSVC build, all 216 CTest tests, focused simulator/deadline tests, and a separate-process server/client demo pass; `git diff --check` is clean.
+
 ## Deferred implementation choices
 
 These remain intentionally deferred until their implementing milestone:
