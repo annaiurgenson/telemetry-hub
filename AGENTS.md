@@ -2,6 +2,7 @@
 
 ## Scope and workflow
 
+- `docs/MVP_RELEASE_SCOPE.md` defines the scope of the first portfolio release, v0.1.0. Defer optional enhancements listed there until after that release while preserving the requirements below.
 - Work on one user-approved milestone at a time. Do not begin the next milestone without explicit approval.
 - Before implementation, explain the design and list the files to create or modify.
 - Keep changes small and reviewable. Afterward, explain key decisions, tests, warnings, and known limitations.
