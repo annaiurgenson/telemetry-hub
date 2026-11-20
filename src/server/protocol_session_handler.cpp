@@ -2,6 +2,7 @@
 
 #include <telemetryhub/protocol/message_codec.hpp>
 #include <telemetryhub/protocol/message_framer.hpp>
+#include <telemetryhub/support/logger.hpp>
 
 #include <chrono>
 #include <stdexcept>
@@ -27,6 +28,7 @@ struct ProtocolConnectionState
     ConnectionId connection_id;
     std::shared_ptr<DeviceRegistrationRegistry> registrations;
     std::shared_ptr<CommandIngress> ingress;
+    support::Logger* logger;
     protocol::MessageFramer framer;
 };
 
@@ -84,11 +86,22 @@ struct ProtocolConnectionState
                     }
                     else if constexpr (std::is_same_v<Command, protocol::RegisterDevice>)
                     {
-                        const auto result = state->registrations->register_device(
+                        const auto snapshot = state->registrations->register_device_with_count(
                             connection_id, command.device_id);
+                        const auto result = snapshot.result;
                         if (result == RegistrationResult::registered ||
                             result == RegistrationResult::already_registered)
                         {
+                            if (result == RegistrationResult::registered && state->logger != nullptr)
+                            {
+                                state->logger->log(
+                                    support::LogLevel::info,
+                                    support::LogEvent::device_registered,
+                                    {{support::LogFieldKey::device_id,
+                                      std::string_view{command.device_id}},
+                                     {support::LogFieldKey::active_device_count,
+                                      static_cast<std::uint64_t>(snapshot.active_devices)}});
+                            }
                             response.body = protocol::DeviceRegistered{command.device_id};
                         }
                         else if (result == RegistrationResult::connection_already_registered)
@@ -211,9 +224,11 @@ struct ProtocolConnectionState
 
 ProtocolSessionHandler::ProtocolSessionHandler(
     std::shared_ptr<DeviceRegistrationRegistry> registrations,
-    std::shared_ptr<CommandIngress> ingress)
+    std::shared_ptr<CommandIngress> ingress,
+    support::Logger* logger)
     : registrations_{std::move(registrations)},
-      ingress_{std::move(ingress)}
+      ingress_{std::move(ingress)},
+      logger_{logger}
 {
     if (!registrations_ || !ingress_)
     {
@@ -224,8 +239,9 @@ ProtocolSessionHandler::ProtocolSessionHandler(
 network::SessionCallbacks ProtocolSessionHandler::callbacks_for(const ConnectionId connection_id) const
 {
     auto state = std::make_shared<ProtocolConnectionState>(
-        ProtocolConnectionState{connection_id, registrations_, ingress_, {}});
+        ProtocolConnectionState{connection_id, registrations_, ingress_, logger_, {}});
     const auto registrations = registrations_;
+    support::Logger* const logger = logger_;
     return network::SessionCallbacks{
         [state](const ConnectionId callback_id, const std::span<const std::byte> bytes) {
             if (callback_id != state->connection_id)
@@ -234,10 +250,21 @@ network::SessionCallbacks ProtocolSessionHandler::callbacks_for(const Connection
             }
             return handle_bytes(state, bytes);
         },
-        [registrations, connection_id](const ConnectionId disconnected_id) {
+        [registrations, connection_id, logger](const ConnectionId disconnected_id) {
             if (disconnected_id == connection_id)
             {
-                registrations->erase_connection(disconnected_id);
+                const DisconnectSnapshot snapshot =
+                    registrations->erase_connection_with_count(disconnected_id);
+                if (snapshot.device_id.has_value() && logger != nullptr)
+                {
+                    logger->log(
+                        support::LogLevel::info,
+                        support::LogEvent::device_disconnected,
+                        {{support::LogFieldKey::device_id,
+                          std::string_view{*snapshot.device_id}},
+                         {support::LogFieldKey::active_device_count,
+                          static_cast<std::uint64_t>(snapshot.active_devices)}});
+                }
             }
         }};
 }

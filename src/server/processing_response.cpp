@@ -77,31 +77,35 @@ std::optional<std::string> format_received_timestamp(const domain::ReceivedAt re
     return timestamp.str();
 }
 
-Response make_processing_response(
+ProcessingOutcome make_processing_outcome(
     const CommandEnvelope& envelope,
     const domain::TelemetryProcessor& processor)
 {
     return std::visit(
-        [&envelope, &processor](const auto& command) -> Response {
+        [&envelope, &processor](const auto& command) -> ProcessingOutcome {
             using Command = std::decay_t<decltype(command)>;
             if constexpr (std::is_same_v<Command, protocol::SubmitTelemetry>)
             {
                 const auto result = processor.submit_telemetry(
                     envelope.device_id, command.metric, command.value,
                     envelope.received_at, envelope.receive_sequence);
-                if (std::holds_alternative<domain::TelemetryAcceptedResult>(result))
+                if (const auto* accepted =
+                        std::get_if<domain::TelemetryAcceptedResult>(&result))
                 {
-                    return Response{envelope.request_id, ResponseBody{protocol::TelemetryAccepted{}}};
+                    return {
+                        Response{envelope.request_id, ResponseBody{protocol::TelemetryAccepted{}}},
+                        accepted->statistics};
                 }
-                return error_response(
-                    envelope.request_id, std::get<TelemetryProcessingError>(result));
+                return {error_response(
+                            envelope.request_id, std::get<TelemetryProcessingError>(result)),
+                        std::nullopt};
             }
             else
             {
                 const auto result = processor.get_statistics(envelope.device_id, command.metric);
                 if (const auto* error = std::get_if<TelemetryProcessingError>(&result))
                 {
-                    return error_response(envelope.request_id, *error);
+                    return {error_response(envelope.request_id, *error), std::nullopt};
                 }
 
                 const auto& query = std::get<domain::StatisticsQueryResult>(result);
@@ -109,10 +113,10 @@ Response make_processing_response(
                     query.statistics.last_received_at);
                 if (!formatted_timestamp.has_value())
                 {
-                    return make_processing_unavailable_response(envelope.request_id);
+                    return {make_processing_unavailable_response(envelope.request_id), std::nullopt};
                 }
 
-                return Response{
+                return {Response{
                     envelope.request_id,
                     ResponseBody{protocol::Statistics{
                         query.metric,
@@ -121,10 +125,17 @@ Response make_processing_response(
                         query.statistics.maximum,
                         query.statistics.mean,
                         query.statistics.last_value,
-                        *formatted_timestamp}}};
+                         *formatted_timestamp}}}, std::nullopt};
             }
         },
         envelope.command);
+}
+
+Response make_processing_response(
+    const CommandEnvelope& envelope,
+    const domain::TelemetryProcessor& processor)
+{
+    return make_processing_outcome(envelope, processor).response;
 }
 
 Response make_processing_unavailable_response(const protocol::RequestId request_id)

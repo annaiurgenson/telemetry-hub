@@ -66,6 +66,7 @@ private:
     static void process_and_respond(
         const CommandEnvelope& envelope,
         domain::TelemetryProcessor& processor,
+        support::Logger* logger,
         const ResponseSink& response_sink) noexcept;
     static void attempt_fallback_response(
         const CommandEnvelope& envelope,

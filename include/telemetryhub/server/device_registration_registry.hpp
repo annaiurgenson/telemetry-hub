@@ -19,6 +19,18 @@ enum class RegistrationResult
     device_in_use
 };
 
+struct RegistrationSnapshot
+{
+    RegistrationResult result;
+    std::size_t active_devices;
+};
+
+struct DisconnectSnapshot
+{
+    std::optional<std::string> device_id;
+    std::size_t active_devices;
+};
+
 // One mutex linearizes registration and ConnectionId-checked disconnect cleanup.
 class DeviceRegistrationRegistry
 {
@@ -26,7 +38,12 @@ public:
     [[nodiscard]] RegistrationResult register_device(
         network::ConnectionId connection_id,
         std::string_view device_id);
+    [[nodiscard]] RegistrationSnapshot register_device_with_count(
+        network::ConnectionId connection_id,
+        std::string_view device_id);
     void erase_connection(network::ConnectionId connection_id) noexcept;
+    [[nodiscard]] DisconnectSnapshot erase_connection_with_count(
+        network::ConnectionId connection_id) noexcept;
     [[nodiscard]] bool is_registered(network::ConnectionId connection_id) const noexcept;
     [[nodiscard]] std::optional<std::string> device_for_connection(
         network::ConnectionId connection_id) const;

@@ -171,6 +171,30 @@ TEST(Logger, WritesStableJsonLinesSchemaAndSupportedValues)
     EXPECT_FALSE(logger.output_failed());
 }
 
+TEST(Logger, WritesEscapedStringsAndFiniteFloatingPointFields)
+{
+    std::ostringstream output;
+    Logger logger{output, LogLevel::info};
+    logger.log(
+        LogLevel::info,
+        LogEvent::telemetry_accepted,
+        {{LogFieldKey::device_id, std::string{"sensor\"one"}},
+         {LogFieldKey::metric, std::string{"temperature"}},
+         {LogFieldKey::value, 21.5},
+         {LogFieldKey::sample_count, std::uint64_t{1U}},
+         {LogFieldKey::minimum, 21.5},
+         {LogFieldKey::maximum, 21.5},
+         {LogFieldKey::mean, 21.5}});
+
+    const json record = json::parse(only_line(output.str()));
+    EXPECT_EQ(record.at("event"), "telemetry_accepted");
+    EXPECT_EQ(record.at("fields").at("device_id"), "sensor\"one");
+    EXPECT_EQ(record.at("fields").at("metric"), "temperature");
+    EXPECT_DOUBLE_EQ(record.at("fields").at("value").get<double>(), 21.5);
+    EXPECT_EQ(record.at("fields").at("sample_count"), 1U);
+    EXPECT_DOUBLE_EQ(record.at("fields").at("mean").get<double>(), 21.5);
+}
+
 TEST(Logger, FlushesEachSuccessfullyWrittenRecord)
 {
     ControlledBuffer buffer;
@@ -197,11 +221,15 @@ TEST(Logger, EmitsStableLevelAndEventNamesAndEmptyFields)
         LogEvent::session_send_failed,
         LogEvent::command_dispatcher_failed,
         LogEvent::command_processing_failed,
+        LogEvent::device_registered,
+        LogEvent::device_disconnected,
+        LogEvent::telemetry_accepted,
         LogEvent::unknown_failure};
     constexpr const char* event_names[]{
         "application_started", "application_stopping", "application_stopped",
         "application_start_failed", "accept_failed", "session_receive_failed",
         "session_send_failed", "command_dispatcher_failed", "command_processing_failed",
+        "device_registered", "device_disconnected", "telemetry_accepted",
         "unknown_failure"};
 
     for (std::size_t index = 0U; index < std::size(levels); ++index)
@@ -234,6 +262,8 @@ TEST(Logger, AppliesMinimumSeverityAndRejectsInvalidInputsWithoutDisablingOutput
     logger.log(LogLevel::error, static_cast<LogEvent>(99));
     logger.log(LogLevel::error, LogEvent::application_started,
                {{static_cast<LogFieldKey>(99), std::int64_t{1}}});
+    logger.log(LogLevel::error, LogEvent::telemetry_accepted,
+               {{LogFieldKey::value, std::numeric_limits<double>::infinity()}});
     logger.log(LogLevel::error, LogEvent::application_started,
                {{LogFieldKey::port, std::uint64_t{1U}},
                 {LogFieldKey::port, std::uint64_t{2U}}});
@@ -258,9 +288,13 @@ TEST(Logger, EnforcesThreadIdAndRecordSizeLimitsAndRecovers)
     EXPECT_FALSE(format_record(
         LogLevel::info, LogEvent::application_started, {}, timestamp,
         std::string(max_thread_id_size_bytes + 1U, 'a')).has_value());
-    EXPECT_FALSE(format_record(
+    EXPECT_TRUE(format_record(
         LogLevel::info, LogEvent::application_started, {}, timestamp,
         std::string(max_thread_id_size_bytes, '\n')).has_value());
+    EXPECT_FALSE(format_record(
+        LogLevel::info, LogEvent::device_registered,
+        {{LogFieldKey::device_id,
+          std::string(max_log_record_size_bytes, 'x')}}, timestamp, "thread").has_value());
 
     EXPECT_FALSE(format_utc_timestamp(system_clock::time_point::max()).has_value());
     std::ostringstream output;

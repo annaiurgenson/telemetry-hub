@@ -44,13 +44,24 @@ RecordSampleStatus TelemetryStore::record_sample(
     const ReceivedAt received_at,
     const ReceiveSequence receive_sequence)
 {
+    return record_sample_with_snapshot(
+        device_id, metric, value, received_at, receive_sequence).status;
+}
+
+RecordSampleResult TelemetryStore::record_sample_with_snapshot(
+    const std::string_view device_id,
+    const std::string_view metric,
+    const double value,
+    const ReceivedAt received_at,
+    const ReceiveSequence receive_sequence)
+{
     if (!valid_key_component(device_id) || !valid_key_component(metric))
     {
-        return RecordSampleStatus::invalid_key;
+        return {RecordSampleStatus::invalid_key, std::nullopt};
     }
     if (!std::isfinite(value))
     {
-        return RecordSampleStatus::invalid_value;
+        return {RecordSampleStatus::invalid_value, std::nullopt};
     }
 
     // Allocate/copy the key before locking or changing store state. If an
@@ -62,26 +73,26 @@ RecordSampleStatus TelemetryStore::record_sample(
     {
         if (entries_.size() >= max_entries_)
         {
-            return RecordSampleStatus::capacity_reached;
+            return {RecordSampleStatus::capacity_reached, std::nullopt};
         }
 
         const TelemetryStatisticsSnapshot initial{
             1U, value, value, value, value, received_at};
         entries_.emplace(std::move(key), Entry{initial, receive_sequence});
-        return RecordSampleStatus::updated;
+        return {RecordSampleStatus::updated, initial};
     }
 
     const TelemetryStatisticsSnapshot& current = found->second.statistics;
     if (current.sample_count == std::numeric_limits<std::uint64_t>::max())
     {
-        return RecordSampleStatus::count_overflow;
+        return {RecordSampleStatus::count_overflow, std::nullopt};
     }
 
     const std::uint64_t next_count = current.sample_count + 1U;
     const double next_mean = updated_mean(current.mean, value, next_count);
     if (!std::isfinite(next_mean))
     {
-        return RecordSampleStatus::numeric_failure;
+        return {RecordSampleStatus::numeric_failure, std::nullopt};
     }
 
     TelemetryStatisticsSnapshot candidate{
@@ -103,7 +114,7 @@ RecordSampleStatus TelemetryStore::record_sample(
     // completed before the existing entry is modified.
     found->second.statistics = candidate;
     found->second.last_receive_sequence = candidate_sequence;
-    return RecordSampleStatus::updated;
+    return {RecordSampleStatus::updated, candidate};
 }
 
 std::optional<TelemetryStatisticsSnapshot> TelemetryStore::statistics_for(

@@ -64,7 +64,8 @@ int run_server(Logger& logger, const telemetry_server::ConfigurationOverrides& o
             processor, *worker_pool,
             telemetryhub::server::default_incoming_command_queue_capacity, &logger);
         registrations = std::make_shared<telemetryhub::server::DeviceRegistrationRegistry>();
-        handler = std::make_shared<telemetryhub::server::ProtocolSessionHandler>(registrations, ingress);
+        handler = std::make_shared<telemetryhub::server::ProtocolSessionHandler>(
+            registrations, ingress, &logger);
 
         telemetryhub::network::TcpServerConfig config;
         if (overrides.port.has_value())

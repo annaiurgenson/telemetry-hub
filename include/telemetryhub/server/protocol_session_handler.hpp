@@ -6,6 +6,8 @@
 
 #include <memory>
 
+namespace telemetryhub::support { class Logger; }
+
 namespace telemetryhub::server {
 
 class ProtocolSessionHandler
@@ -13,7 +15,8 @@ class ProtocolSessionHandler
 public:
     ProtocolSessionHandler(
         std::shared_ptr<DeviceRegistrationRegistry> registrations,
-        std::shared_ptr<CommandIngress> ingress);
+        std::shared_ptr<CommandIngress> ingress,
+        support::Logger* logger = nullptr);
 
     [[nodiscard]] network::SessionCallbacks callbacks_for(network::ConnectionId connection_id) const;
     [[nodiscard]] std::shared_ptr<DeviceRegistrationRegistry> registrations() const noexcept;
@@ -21,6 +24,7 @@ public:
 private:
     std::shared_ptr<DeviceRegistrationRegistry> registrations_;
     std::shared_ptr<CommandIngress> ingress_;
+    support::Logger* logger_;
 };
 
 } // namespace telemetryhub::server

@@ -7,13 +7,19 @@
 #include <telemetryhub/server/command_ingress.hpp>
 #include <telemetryhub/server/device_registration_registry.hpp>
 #include <telemetryhub/server/protocol_session_handler.hpp>
+#include <telemetryhub/support/logger.hpp>
 
 #include <gtest/gtest.h>
 
+#include <charconv>
+#include <chrono>
 #include <memory>
+#include <optional>
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -23,10 +29,12 @@ class DemoServer
 {
 public:
     DemoServer()
-        : ingress_{std::make_shared<telemetryhub::server::CommandIngress>(
-              processor_, worker_pool_)},
+        : logger_{logs_},
+          ingress_{std::make_shared<telemetryhub::server::CommandIngress>(
+              processor_, worker_pool_,
+              telemetryhub::server::default_incoming_command_queue_capacity, &logger_)},
           handler_{std::make_shared<telemetryhub::server::ProtocolSessionHandler>(
-              registrations_, ingress_)},
+              registrations_, ingress_, &logger_)},
           server_{make_config(handler_)}
     {
         ingress_->start([this](const telemetryhub::network::ConnectionId id,
@@ -48,6 +56,22 @@ public:
         return server_.bound_port();
     }
 
+    [[nodiscard]] bool wait_for_disconnect()
+    {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds{3};
+        while (server_.active_connection_count() != 0U &&
+               std::chrono::steady_clock::now() < deadline)
+        {
+            std::this_thread::yield();
+        }
+        return server_.active_connection_count() == 0U;
+    }
+
+    [[nodiscard]] std::string logs_after_disconnect() const
+    {
+        return logs_.str();
+    }
+
 private:
     [[nodiscard]] static telemetryhub::network::TcpServerConfig make_config(
         const std::shared_ptr<telemetryhub::server::ProtocolSessionHandler>& handler)
@@ -59,6 +83,8 @@ private:
         return config;
     }
 
+    std::ostringstream logs_;
+    telemetryhub::support::Logger logger_;
     telemetryhub::domain::TelemetryStore store_;
     telemetryhub::domain::TelemetryProcessor processor_{store_};
     telemetryhub::concurrency::WorkerPool worker_pool_{
@@ -71,7 +97,37 @@ private:
     telemetryhub::network::TcpServer server_;
 };
 
-TEST(DeviceSimulator, RegistersSubmitsSamplesAndPrintsCorrelatedStatistics)
+[[nodiscard]] std::optional<double> mean_for_sample_count(
+    const std::string_view server_output,
+    const std::size_t sample_count)
+{
+    const std::string count_marker =
+        "\"sample_count\":" + std::to_string(sample_count);
+    const std::size_t count_position = server_output.find(count_marker);
+    if (count_position == std::string_view::npos)
+    {
+        return std::nullopt;
+    }
+
+    constexpr std::string_view mean_marker{"\"mean\":"};
+    const std::size_t mean_position = server_output.find(mean_marker, count_position);
+    if (mean_position == std::string_view::npos)
+    {
+        return std::nullopt;
+    }
+
+    const char* const mean_begin = server_output.data() + mean_position + mean_marker.size();
+    double mean{};
+    const auto parsed = std::from_chars(
+        mean_begin, server_output.data() + server_output.size(), mean);
+    if (parsed.ec != std::errc{})
+    {
+        return std::nullopt;
+    }
+    return mean;
+}
+
+TEST(DeviceSimulator, RegistersSubmitsSamplesAndPrintsEachConfirmedValue)
 {
     DemoServer server;
     std::ostringstream output;
@@ -81,6 +137,9 @@ TEST(DeviceSimulator, RegistersSubmitsSamplesAndPrintsCorrelatedStatistics)
     const std::string transcript = output.str();
     EXPECT_NE(transcript.find("Connected to 127.0.0.1:"), std::string::npos);
     EXPECT_NE(transcript.find("Registered device demo-sensor-1"), std::string::npos);
+    EXPECT_NE(transcript.find("Telemetry accepted: temperature=21.50"), std::string::npos);
+    EXPECT_NE(transcript.find("Telemetry accepted: temperature=22.00"), std::string::npos);
+    EXPECT_NE(transcript.find("Telemetry accepted: temperature=23.50"), std::string::npos);
     std::size_t acknowledgements = 0U;
     std::size_t position = 0U;
     while ((position = transcript.find("Telemetry accepted:", position)) != std::string::npos)
@@ -89,22 +148,48 @@ TEST(DeviceSimulator, RegistersSubmitsSamplesAndPrintsCorrelatedStatistics)
         ++position;
     }
     EXPECT_EQ(acknowledgements, 3U);
-    EXPECT_NE(transcript.find("Statistics for temperature:"), std::string::npos);
-    EXPECT_NE(transcript.find("sample_count: 3"), std::string::npos);
-    EXPECT_NE(transcript.find("minimum: 21.50"), std::string::npos);
-    EXPECT_NE(transcript.find("maximum: 23.50"), std::string::npos);
-    EXPECT_NE(transcript.find("mean: 22.33"), std::string::npos);
-    EXPECT_NE(transcript.find("last_value: 23.50"), std::string::npos);
-    constexpr std::string_view timestamp_label{"last_received_at: "};
-    const std::size_t timestamp_start = transcript.find(timestamp_label);
-    ASSERT_NE(timestamp_start, std::string::npos);
-    const std::size_t timestamp_value_start = timestamp_start + timestamp_label.size();
-    const std::size_t timestamp_end = transcript.find('\n', timestamp_value_start);
-    ASSERT_NE(timestamp_end, std::string::npos);
-    const std::string_view timestamp{
-        transcript.data() + timestamp_value_start, timestamp_end - timestamp_value_start};
-    ASSERT_EQ(timestamp.size(), 24U);
-    EXPECT_EQ(timestamp.back(), 'Z');
+    ASSERT_TRUE(server.wait_for_disconnect())
+        << "Timed out waiting for the simulator connection and disconnect log to finish";
+    const std::string server_output = server.logs_after_disconnect();
+    EXPECT_NE(server_output.find("\"event\":\"device_registered\""), std::string::npos);
+    EXPECT_NE(server_output.find("\"active_device_count\":1"), std::string::npos);
+    EXPECT_NE(server_output.find("\"event\":\"device_disconnected\""), std::string::npos);
+    EXPECT_NE(server_output.find("\"active_device_count\":0"), std::string::npos);
+    EXPECT_NE(server_output.find("\"event\":\"telemetry_accepted\""), std::string::npos);
+    EXPECT_NE(
+        server_output.find(
+            "\"value\":21.5,\"sample_count\":1,\"minimum\":21.5,\"maximum\":21.5,\"mean\":21.5"),
+        std::string::npos);
+    EXPECT_NE(
+        server_output.find(
+            "\"value\":22,\"sample_count\":2,\"minimum\":21.5,\"maximum\":22,\"mean\":21.75"),
+        std::string::npos);
+    const auto mean = mean_for_sample_count(server_output, 3U);
+    ASSERT_TRUE(mean.has_value());
+    EXPECT_NEAR(*mean, 67.0 / 3.0, 1e-12);
+}
+
+TEST(DeviceSimulator, RepeatedRunInOneServerContinuesAccumulatingStatistics)
+{
+    DemoServer server;
+    std::ostringstream first_output;
+    std::ostringstream second_output;
+
+    device_simulator::run_demo(server.port(), first_output);
+    ASSERT_TRUE(server.wait_for_disconnect())
+        << "Timed out waiting for the first simulator connection to finish; not reconnecting";
+    device_simulator::run_demo(server.port(), second_output);
+    ASSERT_TRUE(server.wait_for_disconnect())
+        << "Timed out waiting for the second simulator connection and logs to finish";
+
+    EXPECT_EQ(first_output.str().find("Statistics for"), std::string::npos);
+    EXPECT_NE(first_output.str().find("Telemetry accepted: temperature=23.50"), std::string::npos);
+    const std::string logs = server.logs_after_disconnect();
+    EXPECT_NE(logs.find("\"sample_count\":6"), std::string::npos);
+    EXPECT_NE(second_output.str().find("Telemetry accepted: temperature=23.50"), std::string::npos);
+    const auto mean = mean_for_sample_count(logs, 6U);
+    ASSERT_TRUE(mean.has_value());
+    EXPECT_NEAR(*mean, 67.0 / 3.0, 1e-12);
 }
 
 } // namespace

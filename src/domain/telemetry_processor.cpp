@@ -57,13 +57,13 @@ TelemetrySubmissionResult TelemetryProcessor::submit_telemetry(
         return TelemetryProcessingError::invalid_input;
     }
 
-    const RecordSampleStatus status = store_.record_sample(
+    const RecordSampleResult recorded = store_.record_sample_with_snapshot(
         trusted_device_id, metric, value, received_at, receive_sequence);
-    if (status == RecordSampleStatus::updated)
+    if (recorded.status == RecordSampleStatus::updated && recorded.statistics.has_value())
     {
-        return TelemetryAcceptedResult{};
+        return TelemetryAcceptedResult{*recorded.statistics};
     }
-    return map_store_error(status);
+    return map_store_error(recorded.status);
 }
 
 StatisticsQueryExecutionResult TelemetryProcessor::get_statistics(

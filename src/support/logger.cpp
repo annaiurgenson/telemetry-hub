@@ -5,6 +5,7 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cmath>
 #include <locale>
 #include <ostream>
 #include <sstream>
@@ -73,6 +74,12 @@ namespace {
         return "command_dispatcher_failed";
     case LogEvent::command_processing_failed:
         return "command_processing_failed";
+    case LogEvent::device_registered:
+        return "device_registered";
+    case LogEvent::device_disconnected:
+        return "device_disconnected";
+    case LogEvent::telemetry_accepted:
+        return "telemetry_accepted";
     case LogEvent::unknown_failure:
         return "unknown_failure";
     }
@@ -91,6 +98,22 @@ namespace {
         return "request_id";
     case LogFieldKey::error_code:
         return "error_code";
+    case LogFieldKey::device_id:
+        return "device_id";
+    case LogFieldKey::active_device_count:
+        return "active_device_count";
+    case LogFieldKey::metric:
+        return "metric";
+    case LogFieldKey::value:
+        return "value";
+    case LogFieldKey::sample_count:
+        return "sample_count";
+    case LogFieldKey::minimum:
+        return "minimum";
+    case LogFieldKey::maximum:
+        return "maximum";
+    case LogFieldKey::mean:
+        return "mean";
     }
     return {};
 }
@@ -174,6 +197,21 @@ template <typename Integer>
             {
                 return append_bounded(output, item ? "true" : "false");
             }
+            else if constexpr (std::is_same_v<Value, std::string> ||
+                               std::is_same_v<Value, std::string_view>)
+            {
+                return append_json_string(output, item);
+            }
+            else if constexpr (std::is_same_v<Value, double>)
+            {
+                std::array<char, 64U> buffer{};
+                const auto result = std::to_chars(
+                    buffer.data(), buffer.data() + buffer.size(), item,
+                    std::chars_format::general);
+                return result.ec == std::errc{} && append_bounded(
+                    output, std::string_view{buffer.data(),
+                        static_cast<std::size_t>(result.ptr - buffer.data())});
+            }
             else
             {
                 return append_integer(output, item);
@@ -192,6 +230,11 @@ template <typename Integer>
     for (auto current = fields.begin(); current != fields.end(); ++current)
     {
         if (field_name(current->key).empty())
+        {
+            return false;
+        }
+        if (const auto* number = std::get_if<double>(&current->value);
+            number != nullptr && !std::isfinite(*number))
         {
             return false;
         }

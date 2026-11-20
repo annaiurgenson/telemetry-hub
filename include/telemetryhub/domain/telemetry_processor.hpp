@@ -10,6 +10,7 @@ namespace telemetryhub::domain {
 
 struct TelemetryAcceptedResult
 {
+    TelemetryStatisticsSnapshot statistics;
     bool operator==(const TelemetryAcceptedResult&) const = default;
 };
 

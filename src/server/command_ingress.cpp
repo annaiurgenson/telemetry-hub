@@ -183,8 +183,8 @@ void CommandIngress::dispatch(
     {
         owned_envelope = std::make_shared<CommandEnvelope>(std::move(envelope));
         auto submission = worker_pool_.submit(
-            [owned_envelope, processor = &processor_, response_sink]() noexcept {
-                process_and_respond(*owned_envelope, *processor, response_sink);
+            [owned_envelope, processor = &processor_, logger = logger_, response_sink]() noexcept {
+                process_and_respond(*owned_envelope, *processor, logger, response_sink);
             });
         if (submission.status == concurrency::SubmitStatus::accepted)
         {
@@ -204,26 +204,45 @@ void CommandIngress::dispatch(
 
     if (owned_envelope)
     {
-        process_and_respond(*owned_envelope, processor_, response_sink);
+        process_and_respond(*owned_envelope, processor_, logger_, response_sink);
     }
     else
     {
         // If shared handoff allocation itself failed, the local envelope was
         // not moved into an object and remains available for the same recovery.
-        process_and_respond(envelope, processor_, response_sink);
+        process_and_respond(envelope, processor_, logger_, response_sink);
     }
 }
 
 void CommandIngress::process_and_respond(
     const CommandEnvelope& envelope,
     domain::TelemetryProcessor& processor,
+    support::Logger* logger,
     const ResponseSink& response_sink) noexcept
 {
     bool sink_invoked = false;
     try
     {
-        const protocol::Response response = make_processing_response(envelope, processor);
-        auto frame = encode_response(response);
+        ProcessingOutcome outcome = make_processing_outcome(envelope, processor);
+        if (logger != nullptr && outcome.accepted_statistics.has_value())
+        {
+            if (const auto* command = std::get_if<protocol::SubmitTelemetry>(&envelope.command))
+            {
+                const auto& statistics = *outcome.accepted_statistics;
+                logger->log(
+                    support::LogLevel::info,
+                    support::LogEvent::telemetry_accepted,
+                    {{support::LogFieldKey::device_id,
+                      std::string_view{envelope.device_id}},
+                     {support::LogFieldKey::metric, std::string_view{command->metric}},
+                     {support::LogFieldKey::value, command->value},
+                     {support::LogFieldKey::sample_count, statistics.sample_count},
+                     {support::LogFieldKey::minimum, statistics.minimum},
+                     {support::LogFieldKey::maximum, statistics.maximum},
+                     {support::LogFieldKey::mean, statistics.mean}});
+            }
+        }
+        auto frame = encode_response(outcome.response);
         if (!frame.has_value())
         {
             attempt_fallback_response(envelope, response_sink, sink_invoked);

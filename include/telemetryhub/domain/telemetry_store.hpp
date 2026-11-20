@@ -39,6 +39,12 @@ enum class RecordSampleStatus
     numeric_failure
 };
 
+struct RecordSampleResult
+{
+    RecordSampleStatus status;
+    std::optional<TelemetryStatisticsSnapshot> statistics;
+};
+
 class TelemetryStore
 {
 public:
@@ -46,6 +52,15 @@ public:
         std::size_t max_entries = default_max_statistics_entries);
 
     [[nodiscard]] RecordSampleStatus record_sample(
+        std::string_view device_id,
+        std::string_view metric,
+        double value,
+        ReceivedAt received_at,
+        ReceiveSequence receive_sequence);
+
+    // Returns the aggregate produced by this exact update while still under
+    // the store lock, so concurrent samples cannot replace the snapshot.
+    [[nodiscard]] RecordSampleResult record_sample_with_snapshot(
         std::string_view device_id,
         std::string_view metric,
         double value,

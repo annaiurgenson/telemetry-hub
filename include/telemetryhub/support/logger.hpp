@@ -5,6 +5,7 @@
 #include <initializer_list>
 #include <iosfwd>
 #include <mutex>
+#include <string>
 #include <variant>
 
 namespace telemetryhub::support {
@@ -28,6 +29,9 @@ enum class LogEvent
     session_send_failed,
     command_dispatcher_failed,
     command_processing_failed,
+    device_registered,
+    device_disconnected,
+    telemetry_accepted,
     unknown_failure
 };
 
@@ -36,10 +40,19 @@ enum class LogFieldKey
     port,
     connection_id,
     request_id,
-    error_code
+    error_code,
+    device_id,
+    active_device_count,
+    metric,
+    value,
+    sample_count,
+    minimum,
+    maximum,
+    mean
 };
 
-using LogValue = std::variant<std::int64_t, std::uint64_t, bool>;
+using LogValue =
+    std::variant<std::int64_t, std::uint64_t, bool, double, std::string, std::string_view>;
 
 struct LogField
 {

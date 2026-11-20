@@ -16,6 +16,16 @@ namespace telemetryhub::server {
     const CommandEnvelope& envelope,
     const domain::TelemetryProcessor& processor);
 
+struct ProcessingOutcome
+{
+    protocol::Response response;
+    std::optional<domain::TelemetryStatisticsSnapshot> accepted_statistics;
+};
+
+[[nodiscard]] ProcessingOutcome make_processing_outcome(
+    const CommandEnvelope& envelope,
+    const domain::TelemetryProcessor& processor);
+
 [[nodiscard]] protocol::Response make_processing_unavailable_response(
     protocol::RequestId request_id);
 

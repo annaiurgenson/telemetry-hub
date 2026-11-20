@@ -41,6 +41,25 @@ TEST(TelemetryStoreTest, FirstSampleCreatesCompleteStatistics)
     EXPECT_EQ(result->last_received_at, timestamp);
 }
 
+TEST(TelemetryStoreTest, ReturnsSnapshotFromTheExactAcceptedUpdate)
+{
+    TelemetryStore store;
+    const auto first = store.record_sample_with_snapshot(
+        "device-a", "temperature", 21.5, received_at(1), 1U);
+    ASSERT_EQ(first.status, RecordSampleStatus::updated);
+    ASSERT_TRUE(first.statistics.has_value());
+    EXPECT_EQ(first.statistics->sample_count, 1U);
+
+    const auto second = store.record_sample_with_snapshot(
+        "device-a", "temperature", 23.5, received_at(2), 2U);
+    ASSERT_EQ(second.status, RecordSampleStatus::updated);
+    ASSERT_TRUE(second.statistics.has_value());
+    EXPECT_EQ(second.statistics->sample_count, 2U);
+    EXPECT_DOUBLE_EQ(second.statistics->minimum, 21.5);
+    EXPECT_DOUBLE_EQ(second.statistics->maximum, 23.5);
+    EXPECT_DOUBLE_EQ(second.statistics->mean, 22.5);
+}
+
 TEST(TelemetryStoreTest, RepeatedSamplesCalculateAggregateStatistics)
 {
     TelemetryStore store;

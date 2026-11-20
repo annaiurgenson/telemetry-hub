@@ -192,23 +192,6 @@ void run_demo(const std::uint16_t port, std::ostream& output)
         output << "Telemetry accepted: " << demo_metric << '=' << std::fixed
                << std::setprecision(2) << value << '\n';
     }
-
-    const Response response = client.request(
-        Command{telemetryhub::protocol::GetStatistics{std::string{demo_metric}}});
-    const auto* statistics =
-        std::get_if<telemetryhub::protocol::Statistics>(&response.body);
-    if (statistics == nullptr || statistics->metric != demo_metric)
-    {
-        throw std::runtime_error{"Server returned an unexpected statistics response"};
-    }
-
-    output << "Statistics for " << statistics->metric << ":\n"
-           << "  sample_count: " << statistics->sample_count << '\n'
-           << "  minimum: " << statistics->minimum << '\n'
-           << "  maximum: " << statistics->maximum << '\n'
-           << "  mean: " << statistics->mean << '\n'
-           << "  last_value: " << statistics->last_value << '\n'
-           << "  last_received_at: " << statistics->last_received_at << '\n';
 }
 
 } // namespace device_simulator
