@@ -12,27 +12,27 @@ The project demonstrates RAII Winsock ownership, nonblocking TCP I/O, bounded le
 
 ## Build and test
 
-From a Visual Studio Developer PowerShell:
+From a Visual Studio 2022 Developer PowerShell, configure once, then build and test Release:
 
 ```powershell
 git clone https://github.com/annaiurgenson/telemetry-hub.git
 cd telemetry-hub
 cmake --preset windows-msvc
-cmake --build --preset windows-msvc-debug --parallel
-ctest --preset windows-msvc-debug --output-on-failure
 cmake --build build\windows-msvc --config Release --parallel
 ctest --test-dir build\windows-msvc -C Release --output-on-failure
 ```
 
-The preset uses Visual Studio 2022 x64, enables tests, and places Debug executables in `build\windows-msvc\Debug`. The full CTest suite includes unit tests and localhost integration tests. To repeat the concurrency and protocol-session suites 20 times:
+The `windows-msvc` preset uses Visual Studio 2022 x64 and enables tests. Visual Studio keeps configurations in separate output directories: Release executables are in `build\windows-msvc\Release` and test executables are in `build\windows-msvc\tests\Release`; Debug executables are in `build\windows-msvc\Debug` and `build\windows-msvc\tests\Debug`. Select the matching configuration when building and running CTest. The full suite includes unit tests and localhost integration tests.
+
+### Developer testing
+
+For a broader Debug stress check, this local filter repeats every registered test in the WorkerPool, CommandIngress, TcpServer, and ProtocolSession suites 20 times:
 
 ```powershell
-ctest --preset windows-msvc-debug `
-  --tests-regex '^(WorkerPool|CommandIngress|TcpServer|ProtocolSession)\.' `
-  --repeat until-fail:20 --output-on-failure
+ctest --preset windows-msvc-debug --tests-regex '^(WorkerPool|CommandIngress|TcpServer|ProtocolSession)[.]' --repeat until-fail:20 --output-on-failure
 ```
 
-GitHub Actions runs the same MSVC preset on `windows-2022`, checks the full suite, and repeats an explicit concurrency/integration test selection. Check Actions for the result attached to the specific commit; a local pass or workflow file alone does not establish hosted CI success.
+The local four-suite filter is broader than CI's explicit 19-test regression selection. GitHub Actions runs the complete Debug CTest suite and repeats only those named regression tests 20 times on `windows-2022`. The hosted Windows CI run for commit `56f2ef406e07067471e58948ab8ca1f232eacb38` completed successfully on 2026-11-20. A local pass or workflow file alone does not establish hosted CI success; see the [run attached to the commit](https://github.com/annaiurgenson/telemetry-hub/actions/runs/44722700530).
 
 ## Run the demonstration
 

@@ -47,9 +47,19 @@ struct ConnectedSockets
     Socket server;
 };
 
-[[nodiscard]] ConnectedSockets make_connected_sockets()
+[[nodiscard]] ConnectedSockets make_connected_sockets(const int server_receive_buffer_size = 0)
 {
     Socket listener = create_ipv4_tcp_socket();
+    if (server_receive_buffer_size > 0 &&
+        setsockopt(
+            listener.native_handle(), SOL_SOCKET, SO_RCVBUF,
+            reinterpret_cast<const char*>(&server_receive_buffer_size),
+            static_cast<int>(sizeof(server_receive_buffer_size))) == SOCKET_ERROR)
+    {
+        throw std::system_error{
+            std::error_code{WSAGetLastError(), std::system_category()},
+            "Failed to set loopback listener receive buffer"};
+    }
     bind_loopback(listener, 0U);
     listen(listener);
     const std::uint16_t port = local_port(listener);
@@ -479,7 +489,7 @@ TEST_F(TcpCommunicationTest, LargePayloadIsCompletelySentWithConstrainedSendBuff
 TEST_F(TcpCommunicationTest, WriterCancellationWhenPeerDoesNotConsumeData)
 {
     using namespace std::chrono_literals;
-    ConnectedSockets sockets = make_connected_sockets();
+    ConnectedSockets sockets = make_connected_sockets(1024);
     saturate_send_buffer(sockets.client);
 
     std::stop_source stop_source;
@@ -487,39 +497,52 @@ TEST_F(TcpCommunicationTest, WriterCancellationWhenPeerDoesNotConsumeData)
     auto entered_future = entered.get_future();
     std::promise<telemetryhub::network::SendResult> completion;
     auto completed = completion.get_future();
+    const std::vector<std::byte> extra(16U * 1024U * 1024U, std::byte{'X'});
     std::jthread writer{[&] {
-        constexpr std::array extra{std::byte{'X'}};
         entered.set_value();
         completion.set_value(send_all(sockets.client, extra, stop_source.get_token()));
     }};
+    struct StopAndUnblockWriter
+    {
+        std::stop_source& stop_source;
+        std::future<telemetryhub::network::SendResult>& completed;
+        const Socket& socket;
+
+        ~StopAndUnblockWriter()
+        {
+            stop_source.request_stop();
+            if (!completed.valid() ||
+                completed.wait_for(1s) == std::future_status::ready)
+            {
+                return;
+            }
+            (void)socket.shutdown(SD_BOTH);
+        }
+    } cleanup{stop_source, completed, sockets.client};
 
     EXPECT_EQ(entered_future.wait_for(2s), std::future_status::ready);
     EXPECT_EQ(completed.wait_for(20ms), std::future_status::timeout);
     stop_source.request_stop();
     const auto status = completed.wait_for(1s);
     EXPECT_EQ(status, std::future_status::ready);
-    writer.join();
     if (status == std::future_status::ready)
     {
+        writer.join();
         const auto result = completed.get();
         EXPECT_TRUE(result.cancelled);
         EXPECT_FALSE(result.error);
+        EXPECT_FALSE(sockets.client.close());
+        EXPECT_FALSE(sockets.server.close());
     }
-    EXPECT_FALSE(sockets.client.close());
-    EXPECT_FALSE(sockets.server.close());
 }
 
 TEST_F(TcpCommunicationTest, DynamicDeadlineInterruptsAnAlreadyBackpressuredSend)
 {
     using namespace std::chrono_literals;
-    ConnectedSockets sockets = make_connected_sockets();
-    int receive_buffer_size = 1024;
-    ASSERT_EQ(setsockopt(
-        sockets.server.native_handle(), SOL_SOCKET, SO_RCVBUF,
-        reinterpret_cast<const char*>(&receive_buffer_size),
-        static_cast<int>(sizeof(receive_buffer_size))), 0);
+    ConnectedSockets sockets = make_connected_sockets(1024);
     saturate_send_buffer(sockets.client);
 
+    const std::vector<std::byte> extra(16U * 1024U * 1024U, std::byte{'D'});
     std::atomic<std::int64_t> deadline_ticks{0};
     std::promise<void> entered;
     auto entered_future = entered.get_future();
@@ -527,22 +550,60 @@ TEST_F(TcpCommunicationTest, DynamicDeadlineInterruptsAnAlreadyBackpressuredSend
     auto completed = completion.get_future();
     std::jthread writer{[&] {
         entered.set_value();
-        const std::vector<std::byte> extra(16U * 1024U * 1024U, std::byte{'D'});
         completion.set_value(send_all(
             sockets.client, extra, {}, std::nullopt, &deadline_ticks));
     }};
+    struct DeadlineWriterCleanup
+    {
+        std::atomic<std::int64_t>& deadline_ticks;
+        std::future<telemetryhub::network::SendResult>& completed;
+        const Socket& socket;
+
+        ~DeadlineWriterCleanup()
+        {
+            deadline_ticks.store(
+                static_cast<std::int64_t>(
+                    std::chrono::steady_clock::now().time_since_epoch().count()),
+                std::memory_order_release);
+            if (!completed.valid() ||
+                completed.wait_for(1s) == std::future_status::ready)
+            {
+                return;
+            }
+            (void)socket.shutdown(SD_BOTH);
+        }
+    } cleanup{deadline_ticks, completed, sockets.client};
 
     ASSERT_EQ(entered_future.wait_for(2s), std::future_status::ready);
-    const auto deadline = std::chrono::steady_clock::now() + 100ms;
+    EXPECT_EQ(completed.wait_for(20ms), std::future_status::timeout);
+    const auto deadline_set_at = std::chrono::steady_clock::now();
+    const auto deadline = deadline_set_at + 100ms;
     deadline_ticks.store(
         static_cast<std::int64_t>(deadline.time_since_epoch().count()), std::memory_order_release);
-    ASSERT_EQ(completed.wait_for(1s), std::future_status::ready);
-    const auto result = completed.get();
-    writer.join();
-    EXPECT_TRUE(result.timed_out);
-    EXPECT_FALSE(result.error);
-    EXPECT_FALSE(sockets.client.close());
-    EXPECT_FALSE(sockets.server.close());
+    EXPECT_EQ(completed.wait_for(0ms), std::future_status::timeout);
+    const auto status = completed.wait_for(1s);
+    EXPECT_EQ(status, std::future_status::ready);
+    if (status == std::future_status::ready)
+    {
+        writer.join();
+        const auto result = completed.get();
+        const auto completed_at = std::chrono::steady_clock::now();
+        SCOPED_TRACE(testing::Message()
+                     << "elapsed_ms="
+                     << std::chrono::duration_cast<std::chrono::milliseconds>(
+                            completed_at - deadline_set_at).count()
+                     << " bytes_transferred=" << result.bytes_transferred
+                     << " cancelled=" << result.cancelled
+                     << " timed_out=" << result.timed_out
+                     << " error_value=" << result.error.value()
+                     << " error_category=" << result.error.category().name()
+                     << " error_message=" << result.error.message());
+        EXPECT_TRUE(result.timed_out);
+        EXPECT_FALSE(result.error);
+        EXPECT_FALSE(result.cancelled);
+        EXPECT_FALSE(sockets.client.close());
+        EXPECT_FALSE(sockets.server.close());
+    }
 }
 TEST_F(TcpCommunicationTest, ReaderAndWriterExitBeforeOwnerClosesSocket)
 {

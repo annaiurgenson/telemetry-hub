@@ -51,13 +51,15 @@ Reuse existing codec/framing/transport facilities as appropriate. No GUI, databa
 
 ### 6E — Portfolio Release v0.1.0
 
+**Verification status (2026-11-22): local Release checks pass; tag/publication remain separate approval actions.** The baseline was `56f2ef406e07067471e58948ab8ca1f232eacb38`, matching local `origin/main`; GitHub Windows CI for that commit passed on 2026-11-20. A clean Release build using cached pinned dependency sources passed; full CTest passed 219/219. The Release demo on port 5052 verified three ACKs per simulator run, active device counts 1 → 0, sample counts 3 → 6 across the second run, and a fresh aggregate after server restart. `TcpCommunicationTest.WriterCancellationWhenPeerDoesNotConsumeData` and `TcpCommunicationTest.DynamicDeadlineInterruptsAnAlreadyBackpressuredSend` each passed 30/30 independent Release repeats after the tests constrained the peer receive buffer before connection. The deadline test preserves its 100 ms deadline and checks pending state at deadline installation. A fresh dependency download was blocked by network policy. The existing `v0.1.0` tag points to `559ac9739b122abc74ef240b34639c6c7fb0020e`, not the verified baseline. See `docs/PROJECT_PLAN.md` for build details and cleanup guarantees.
+
 - Ensure a clean Windows 10 / Visual Studio 2022 / MSVC / CMake build and full CTest pass.
 - Verify GitHub-hosted Windows CI for the release commit, or explicitly document any inability to verify it.
 - Update README with project purpose, concise architecture, requirements, reproducible build/run commands, and a small server-plus-client demo transcript.
 - Provide one clear architectural flow diagram; document the known limits (e.g. Windows/loopback focus, in-memory aggregates, no persisted raw sample history).
 - Check final diff / repository state; create a `v0.1.0` tag only after successful release checks and explicit approval.
 
-The release is done when a reviewer can clone, build, start the server, run the example client, observe accepted readings and statistics, understand the architecture, and see relevant tests passing. Further embellishment is NOT a release requirement.
+The release is done when a reviewer can clone, build, start the server, run the example client, observe accepted readings and statistics, understand the architecture, and see relevant tests passing. Further embellishment is NOT a release requirement. The current verification is recorded above. Create or move a `v0.1.0` tag only after successful release checks and explicit approval.
 
 ## Deferred until AFTER v0.1.0
 
