@@ -11,8 +11,11 @@
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <charconv>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <sstream>
@@ -165,6 +168,59 @@ TEST(DeviceSimulator, RegistersSubmitsSamplesAndPrintsEachConfirmedValue)
             "\"value\":22,\"sample_count\":2,\"minimum\":21.5,\"maximum\":22,\"mean\":21.75"),
         std::string::npos);
     const auto mean = mean_for_sample_count(server_output, 3U);
+    ASSERT_TRUE(mean.has_value());
+    EXPECT_NEAR(*mean, 67.0 / 3.0, 1e-12);
+}
+
+TEST(DeviceSimulator, PeriodicModeAcknowledgesSixSamplesAndAggregatesThem)
+{
+    DemoServer server;
+    std::ostringstream output;
+    constexpr std::uint32_t interval_ms = 40U;
+    constexpr std::uint32_t sample_count = 6U;
+    const auto started = std::chrono::steady_clock::now();
+
+    device_simulator::run_demo(
+        device_simulator::DemoOptions{server.port(), interval_ms, sample_count}, output);
+
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    const auto minimum_elapsed = std::chrono::milliseconds{
+        static_cast<std::int64_t>(interval_ms) * static_cast<std::int64_t>(sample_count - 1U)};
+    // This fixture exposes server logs, not per-request steady-clock receive
+    // times, so the lower bound verifies the cumulative five configured waits.
+    EXPECT_GE(elapsed, minimum_elapsed);
+
+    const std::string transcript = output.str();
+    constexpr std::array<std::string_view, 6U> expected_acknowledgements{
+        "Telemetry accepted: temperature=21.50",
+        "Telemetry accepted: temperature=22.00",
+        "Telemetry accepted: temperature=23.50",
+        "Telemetry accepted: temperature=21.50",
+        "Telemetry accepted: temperature=22.00",
+        "Telemetry accepted: temperature=23.50"};
+    std::size_t position = 0U;
+    for (const std::string_view acknowledgement : expected_acknowledgements)
+    {
+        position = transcript.find(acknowledgement, position);
+        ASSERT_NE(position, std::string::npos) << acknowledgement;
+        position += acknowledgement.size();
+    }
+    EXPECT_EQ(transcript.find("Telemetry accepted:", position), std::string::npos);
+
+    ASSERT_TRUE(server.wait_for_disconnect())
+        << "Timed out waiting for the periodic simulator connection and logs to finish";
+    const std::string server_output = server.logs_after_disconnect();
+    std::size_t accepted_samples = 0U;
+    position = 0U;
+    while ((position = server_output.find("\"event\":\"telemetry_accepted\"", position)) !=
+           std::string::npos)
+    {
+        ++accepted_samples;
+        ++position;
+    }
+    EXPECT_EQ(accepted_samples, sample_count);
+    EXPECT_NE(server_output.find("\"sample_count\":6"), std::string::npos);
+    const auto mean = mean_for_sample_count(server_output, sample_count);
     ASSERT_TRUE(mean.has_value());
     EXPECT_NEAR(*mean, 67.0 / 3.0, 1e-12);
 }

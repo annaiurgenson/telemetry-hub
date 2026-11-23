@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
 #include <string_view>
 
 namespace device_simulator {
@@ -16,6 +17,8 @@ struct ParseResult
 {
     ParseStatus status{ParseStatus::error};
     std::uint16_t port{};
+    std::optional<std::uint32_t> interval_ms;
+    std::optional<std::uint32_t> count;
     std::string_view diagnostic;
     std::string_view argument;
 };

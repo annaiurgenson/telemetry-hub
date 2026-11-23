@@ -8,6 +8,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstddef>
 #include <iomanip>
 #include <ostream>
 #include <span>
@@ -15,6 +16,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <variant>
 
@@ -167,8 +169,18 @@ private:
 
 void run_demo(const std::uint16_t port, std::ostream& output)
 {
-    DemoClient client{port};
-    output << "Connected to 127.0.0.1:" << port << '\n';
+    run_demo(DemoOptions{port, {}, {}}, output);
+}
+
+void run_demo(const DemoOptions& options, std::ostream& output)
+{
+    if (options.interval_ms.has_value() != options.count.has_value())
+    {
+        throw std::invalid_argument{"Periodic mode requires both interval and count"};
+    }
+
+    DemoClient client{options.port};
+    output << "Connected to 127.0.0.1:" << options.port << '\n';
 
     const Response registration = client.request(
         Command{telemetryhub::protocol::RegisterDevice{std::string{demo_device_id}}});
@@ -181,8 +193,17 @@ void run_demo(const std::uint16_t port, std::ostream& output)
     output << "Registered device " << demo_device_id << '\n';
 
     constexpr std::array<double, 3U> readings{21.5, 22.0, 23.5};
-    for (const double value : readings)
+    const std::size_t total_readings = options.count.has_value()
+                                           ? static_cast<std::size_t>(*options.count)
+                                           : readings.size();
+    for (std::size_t index = 0U; index < total_readings; ++index)
     {
+        if (index > 0U && options.interval_ms.has_value())
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds{*options.interval_ms});
+        }
+
+        const double value = readings[index % readings.size()];
         const Response response = client.request(
             Command{telemetryhub::protocol::SubmitTelemetry{std::string{demo_metric}, value}});
         if (!std::holds_alternative<telemetryhub::protocol::TelemetryAccepted>(response.body))

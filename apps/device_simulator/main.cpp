@@ -26,7 +26,9 @@ int main(const int argc, char* argv[])
 
     try
     {
-        device_simulator::run_demo(parsed.port, std::cout);
+        device_simulator::run_demo(
+            device_simulator::DemoOptions{parsed.port, parsed.interval_ms, parsed.count},
+            std::cout);
         return 0;
     }
     catch (const std::exception& error)

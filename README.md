@@ -70,6 +70,14 @@ To compare one reading, match the simulator line `Telemetry accepted: temperatur
 
 Run the simulator again without stopping the server. The next three server records advance the count from 3 to 6; the last one shows `sample_count` 6. Stopping and restarting the server starts a fresh in-memory aggregate at count 1.
 
+To send a finite periodic sequence, provide both `--interval-ms` and `--count`. The first reading is sent immediately after registration; after each ACK, the simulator waits the requested interval before sending the next reading. It cycles through 21.5, 22.0, and 23.5 until it receives the requested number of ACKs. The interval accepts 1..60000 milliseconds and count accepts 1..1000. Omitting both options preserves the three-reading demo above.
+
+For example, with the server still running on port 5052:
+
+```powershell
+.\build\windows-msvc\Release\device_simulator.exe --port 5052 --interval-ms 500 --count 6
+```
+
 `telemetry_server` also accepts `--max-connections <1..INT_MAX>` and standalone `--help`. With no arguments it retains the existing defaults: port 0 (OS-selected ephemeral loopback port) and 64 maximum active connections. For the paired demo, supply the same nonzero port to both programs. Simulator CLI errors exit 2; connection, timeout, protocol, server, or application failures exit 1; success and help exit 0.
 
 ## Architecture
@@ -111,7 +119,7 @@ Devices must register before telemetry submission or statistics queries, and a d
 
 The server writes synchronous structured JSON Lines lifecycle records, device registration/disconnection counts, accepted measurements with the aggregate snapshot for that update, and selected fatal network/dispatcher failures to `std::clog`. Logging is intentionally limited; output is synchronous and may delay a thread that emits a record.
 
-Milestones 0–5D and 6A–6D are complete. Milestone 6A provides Windows CI, 6B structured logging, 6C server runtime configuration, and 6D the device simulator demo. See [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md) for development history and detailed engineering decisions, and [docs/MVP_RELEASE_SCOPE.md](docs/MVP_RELEASE_SCOPE.md) for the v0.1.0 scope decision.
+Milestones 0–5D, 6A–6E, and 7A are complete. Milestone 6A provides Windows CI, 6B structured logging, 6C server runtime configuration, 6D the device simulator, 6E the v0.1.0 release verification, and 7A optional periodic simulator sending. See [docs/PROJECT_PLAN.md](docs/PROJECT_PLAN.md) for development history and detailed engineering decisions, and [docs/MVP_RELEASE_SCOPE.md](docs/MVP_RELEASE_SCOPE.md) for the v0.1.0 scope decision.
 
 ## v0.1.0 limitations
 
